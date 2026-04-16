@@ -25,3 +25,9 @@ target_include_directories(gpu_engine PRIVATE
     /mnt/c/Users/samca/openfhe-cuda/include
 )
 target_link_libraries(gpu_engine PRIVATE openfhe_cuda_hal CUDA::cudart)
+
+add_executable(benchmark src/benchmark.cpp)
+target_include_directories(benchmark PRIVATE
+    /mnt/c/Users/samca/openfhe-cuda/include
+)
+target_link_libraries(benchmark PRIVATE openfhe_cuda_hal CUDA::cudart)
