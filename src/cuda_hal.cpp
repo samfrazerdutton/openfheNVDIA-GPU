@@ -47,22 +47,31 @@ void CUDAMathHAL::EvalMultRNS(
 
 } // namespace openfhe_cuda
 
-extern "C" void gpu_rns_mult_wrapper(
-    const uint64_t* a, const uint64_t* b, uint64_t* res,
-    uint64_t q, uint32_t ring, uint32_t tower_idx)
+// ── Batched Asynchronous C-Wrapper ───────────────────────────────────────────
+extern "C" void gpu_rns_mult_batch_wrapper(
+    const uint64_t** host_a, const uint64_t** host_b, uint64_t** host_res,
+    const uint64_t* q, uint32_t ring, uint32_t num_towers)
 {
     using namespace openfhe_cuda;
     g_pool.init();
 
-    uint32_t idx   = tower_idx % GPUPool::MAX_TOWERS;
-    cudaStream_t s = g_pool.streams[idx];
-    uint64_t* d_a  = g_pool.d_a[idx];
-    uint64_t* d_b  = g_pool.d_b[idx];
-    uint64_t* d_r  = g_pool.d_res[idx];
+    // 1. Issue all Host-to-Device async copies
+    for (uint32_t i = 0; i < num_towers; ++i) {
+        cudaStream_t s = g_pool.streams[i];
+        cudaMemcpyAsync(g_pool.d_a[i], host_a[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, s);
+        cudaMemcpyAsync(g_pool.d_b[i], host_b[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, s);
+    }
 
-    cudaMemcpyAsync(d_a, a, ring * sizeof(uint64_t), cudaMemcpyHostToDevice, s);
-    cudaMemcpyAsync(d_b, b, ring * sizeof(uint64_t), cudaMemcpyHostToDevice, s);
-    LaunchRNSMult(d_a, d_b, d_r, q, ring, s);
-    cudaMemcpyAsync(res, d_r, ring * sizeof(uint64_t), cudaMemcpyDeviceToHost, s);
-    cudaStreamSynchronize(s);
+    // 2. Issue all Kernels
+    for (uint32_t i = 0; i < num_towers; ++i) {
+        LaunchRNSMult(g_pool.d_a[i], g_pool.d_b[i], g_pool.d_res[i], q[i], ring, g_pool.streams[i]);
+    }
+
+    // 3. Issue all Device-to-Host async copies
+    for (uint32_t i = 0; i < num_towers; ++i) {
+        cudaMemcpyAsync(host_res[i], g_pool.d_res[i], ring * sizeof(uint64_t), cudaMemcpyDeviceToHost, g_pool.streams[i]);
+    }
+
+    // 4. Single synchronization point at the very end
+    cudaDeviceSynchronize();
 }
