@@ -13,11 +13,11 @@ extern "C" void LaunchRNSMult(
 
 namespace openfhe_cuda {
 
-GPUPool g_pool;
-std::vector<cudaStream_t> CUDAMathHAL::streams_;
+// THREAD-LOCAL ISOLATION (Fixes Flaw A)
+thread_local GPUPool g_pool;
 
 void CUDAMathHAL::InitStreams(uint32_t)  { g_pool.init(); }
-void CUDAMathHAL::DestroyStreams()       { g_pool.destroy(); }
+void CUDAMathHAL::DestroyStreams()       {} // Handled by ~GPUPool
 void CUDAMathHAL::Synchronize()         { CUDA_CHECK(cudaDeviceSynchronize()); }
 
 void CUDAMathHAL::AllocateVRAM(std::vector<uint64_t*>& ptrs, uint32_t t, uint32_t r) {
@@ -55,23 +55,15 @@ extern "C" void gpu_rns_mult_batch_wrapper(
     using namespace openfhe_cuda;
     g_pool.init();
 
-    // 1. Issue all Host-to-Device async copies
     for (uint32_t i = 0; i < num_towers; ++i) {
-        cudaStream_t s = g_pool.streams[i];
-        cudaMemcpyAsync(g_pool.d_a[i], host_a[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, s);
-        cudaMemcpyAsync(g_pool.d_b[i], host_b[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, s);
+        cudaMemcpyAsync(g_pool.d_a[i], host_a[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, g_pool.streams[i]);
+        cudaMemcpyAsync(g_pool.d_b[i], host_b[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, g_pool.streams[i]);
     }
-
-    // 2. Issue all Kernels
     for (uint32_t i = 0; i < num_towers; ++i) {
         LaunchRNSMult(g_pool.d_a[i], g_pool.d_b[i], g_pool.d_res[i], q[i], ring, g_pool.streams[i]);
     }
-
-    // 3. Issue all Device-to-Host async copies
     for (uint32_t i = 0; i < num_towers; ++i) {
         cudaMemcpyAsync(host_res[i], g_pool.d_res[i], ring * sizeof(uint64_t), cudaMemcpyDeviceToHost, g_pool.streams[i]);
     }
-
-    // 4. Single synchronization point at the very end
     cudaDeviceSynchronize();
 }
