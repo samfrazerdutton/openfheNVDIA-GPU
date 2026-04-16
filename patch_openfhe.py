@@ -9,7 +9,7 @@ if len(sys.argv) < 2:
 root      = sys.argv[1]
 hdr_path  = os.path.join(root, "src/core/include/lattice/hal/default/dcrtpoly.h")
 cmake_path= os.path.join(root, "src/core/CMakeLists.txt")
-hal_so    = "/mnt/c/Users/samca/openfhe-cuda/build/libopenfhe_cuda_hal.so"
+hal_so    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build", "libopenfhe_cuda_hal.so")
 
 # ── 1. Patch CMakeLists ───────────────────────────────────────────────────────
 with open(cmake_path) as f: cmake = f.read()
