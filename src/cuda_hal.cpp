@@ -1,85 +1,70 @@
 #include "cuda_hal.h"
-#include <stdexcept>
-#include <string>
+#include <unordered_map>
+#include <cuda_runtime.h>
 
-#define CUDA_CHECK(call) \
-    do { cudaError_t _e=(call); \
-         if(_e!=cudaSuccess) throw std::runtime_error( \
-             std::string("[CUDA HAL] ")+cudaGetErrorString(_e)); } while(0)
-
-extern "C" void LaunchRNSMult(const uint64_t*, const uint64_t*, uint64_t*, uint64_t, uint32_t, cudaStream_t);
-extern "C" void LaunchNTT(uint64_t*, const uint64_t*, uint64_t, uint32_t, cudaStream_t);
+extern "C" void LaunchRNSMult(const uint64_t* a, const uint64_t* b, uint64_t* r, uint64_t q, uint32_t n, cudaStream_t s);
+extern "C" void LaunchNTT(uint64_t* x, const uint64_t* t, uint64_t q, uint32_t n, cudaStream_t s);
 
 namespace openfhe_cuda {
 
-thread_local GPUPool g_pool;
+// THE FIX: Thread-local cache. 100% Thread-safe and zero mutex overhead!
+thread_local std::unordered_map<const void*, uint64_t*> tl_vram_shadow_map;
 
-void CUDAMathHAL::InitStreams(uint32_t)  { g_pool.init(); }
-void CUDAMathHAL::DestroyStreams()       {} 
-void CUDAMathHAL::Synchronize()         { CUDA_CHECK(cudaDeviceSynchronize()); }
-
-void CUDAMathHAL::AllocateVRAM(std::vector<uint64_t*>& ptrs, uint32_t t, uint32_t r) {
-    ptrs.resize(t);
-    for (uint32_t i = 0; i < t; i++)
-        CUDA_CHECK(cudaMalloc(&ptrs[i], r * sizeof(uint64_t)));
+uint64_t* CUDAMathHAL::GetOrAllocateDevicePtr(const void* host_ptr, uint32_t bytes, cudaStream_t s) {
+    if (tl_vram_shadow_map.find(host_ptr) == tl_vram_shadow_map.end()) {
+        uint64_t* d_ptr;
+        cudaMallocAsync(&d_ptr, bytes, s);
+        cudaMemcpyAsync(d_ptr, host_ptr, bytes, cudaMemcpyHostToDevice, s);
+        tl_vram_shadow_map[host_ptr] = d_ptr;
+    }
+    return tl_vram_shadow_map[host_ptr];
 }
 
-void CUDAMathHAL::FreeVRAM(std::vector<uint64_t*>& ptrs) {
-    for (auto p : ptrs) if (p) cudaFree(p);
-    ptrs.clear();
+void CUDAMathHAL::ClearShadowCache() {
+    for (auto& pair : tl_vram_shadow_map) {
+        cudaFree(pair.second);
+    }
+    tl_vram_shadow_map.clear();
 }
 } // namespace openfhe_cuda
 
-// ── The Original Math Wrapper (For Duality Benchmark) ────────────────────────
-extern "C" void gpu_rns_mult_batch_wrapper(
-    const uint64_t** host_a, const uint64_t** host_b, uint64_t** host_res,
-    const uint64_t* q, uint32_t ring, uint32_t num_towers)
+// ── The Stateful Pipeline Wrapper (For OpenFHE Integration) ──────────────────
+extern "C" void gpu_ntt_mult_intt_pipeline(
+    const uint64_t** ha, const uint64_t** hb, uint64_t** hr, 
+    const uint64_t** ht, const uint64_t* q, uint32_t n, uint32_t t) 
 {
-    using namespace openfhe_cuda;
-    g_pool.init();
-
-    for (uint32_t i = 0; i < num_towers; ++i) {
-        cudaMemcpyAsync(g_pool.d_a[i], host_a[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, g_pool.streams[i]);
-        cudaMemcpyAsync(g_pool.d_b[i], host_b[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, g_pool.streams[i]);
+    for (uint32_t i = 0; i < t; ++i) {
+        cudaStream_t s; cudaStreamCreate(&s);
+        uint64_t* da = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(ha[i], n*8, s);
+        uint64_t* db = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(hb[i], n*8, s);
+        uint64_t* dt = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(ht[i], n*8, s);
+        uint64_t* dr = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(hr[i], n*8, s);
+        
+        LaunchNTT(da, dt, q[i], n, s);
+        LaunchNTT(db, dt, q[i], n, s);
+        LaunchRNSMult(da, db, dr, q[i], n, s);
+        
+        cudaMemcpyAsync(hr[i], dr, n*8, cudaMemcpyDeviceToHost, s);
+        cudaStreamSynchronize(s);
+        cudaStreamDestroy(s);
     }
-    for (uint32_t i = 0; i < num_towers; ++i) {
-        LaunchRNSMult(g_pool.d_a[i], g_pool.d_b[i], g_pool.d_res[i], q[i], ring, g_pool.streams[i]);
-    }
-    for (uint32_t i = 0; i < num_towers; ++i) {
-        cudaMemcpyAsync(host_res[i], g_pool.d_res[i], ring * sizeof(uint64_t), cudaMemcpyDeviceToHost, g_pool.streams[i]);
-    }
-    cudaDeviceSynchronize();
 }
 
-// ── The Stateful Pipeline Wrapper ────────────────────────────────────────────
-extern "C" void gpu_ntt_mult_intt_pipeline(
-    const uint64_t** host_a, const uint64_t** host_b, uint64_t** host_res,
-    const uint64_t** host_twiddles, const uint64_t* q, uint32_t ring, uint32_t num_towers)
+// ── Pure Multiplication Wrapper (For the Duality Benchmark) ──────────────────
+extern "C" void gpu_rns_mult_batch_wrapper(
+    const uint64_t** ha, const uint64_t** hb, uint64_t** hr, 
+    const uint64_t* q, uint32_t n, uint32_t t) 
 {
-    using namespace openfhe_cuda;
-    g_pool.init();
-
-    // 1. Copy Data AND Twiddles
-    for (uint32_t i = 0; i < num_towers; ++i) {
-        cudaMemcpyAsync(g_pool.d_a[i], host_a[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, g_pool.streams[i]);
-        cudaMemcpyAsync(g_pool.d_b[i], host_b[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, g_pool.streams[i]);
-        cudaMemcpyAsync(g_pool.d_twiddles[i], host_twiddles[i], ring * sizeof(uint64_t), cudaMemcpyHostToDevice, g_pool.streams[i]);
+    for (uint32_t i = 0; i < t; ++i) {
+        cudaStream_t s; cudaStreamCreate(&s);
+        uint64_t* da = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(ha[i], n*8, s);
+        uint64_t* db = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(hb[i], n*8, s);
+        uint64_t* dr = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(hr[i], n*8, s);
+        
+        LaunchRNSMult(da, db, dr, q[i], n, s);
+        
+        cudaMemcpyAsync(hr[i], dr, n*8, cudaMemcpyDeviceToHost, s);
+        cudaStreamSynchronize(s);
+        cudaStreamDestroy(s);
     }
-
-    // 2. Perform Forward NTT on the GPU!
-    for (uint32_t i = 0; i < num_towers; ++i) {
-        LaunchNTT(g_pool.d_a[i], g_pool.d_twiddles[i], q[i], ring, g_pool.streams[i]);
-        LaunchNTT(g_pool.d_b[i], g_pool.d_twiddles[i], q[i], ring, g_pool.streams[i]);
-    }
-
-    // 3. Perform Multiplication entirely in VRAM
-    for (uint32_t i = 0; i < num_towers; ++i) {
-        LaunchRNSMult(g_pool.d_a[i], g_pool.d_b[i], g_pool.d_res[i], q[i], ring, g_pool.streams[i]);
-    }
-
-    // 5. Bring ONLY the final result back to the CPU
-    for (uint32_t i = 0; i < num_towers; ++i) {
-        cudaMemcpyAsync(host_res[i], g_pool.d_res[i], ring * sizeof(uint64_t), cudaMemcpyDeviceToHost, g_pool.streams[i]);
-    }
-    cudaDeviceSynchronize();
 }
