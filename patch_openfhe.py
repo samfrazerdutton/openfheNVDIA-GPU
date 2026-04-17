@@ -1,6 +1,8 @@
 import sys, os, re
 
-print("[*] OpenFHE NVIDIA GPU HAL Patcher v3 (Batched Async & Zero-Copy)")
+print("======================================================")
+print("[*] OpenFHE NVIDIA GPU SWA Patcher (Final)")
+print("======================================================")
 
 if len(sys.argv) < 2:
     print("Usage: python3 patch_openfhe.py /path/to/openfhe-development")
@@ -16,16 +18,16 @@ with open(cmake_path) as f: cmake = f.read()
 if "openfhe_cuda_hal" not in cmake:
     with open(cmake_path, "a") as f:
         f.write(f"\ntarget_include_directories(OPENFHEcore PUBLIC /usr/local/cuda/include)\n")
-        f.write(f"target_link_libraries(OPENFHEcore {hal_so} /usr/local/cuda/lib64/libcudart.so)\n")
+        f.write(f"target_link_libraries(OPENFHEcore {hal_so} /usr/local/cuda/lib64/libcudart.so OpenMP::OpenMP_CXX)\n")
     print("[+] CMakeLists.txt patched")
 else:
     print("[-] CMakeLists.txt already patched")
 
-# ── 2. Patch dcrtpoly.h ───────────────────────────────────────────────────────
+# ── 2. Patch dcrtpoly.h (Injecting SWA) ───────────────────────────────────────
 with open(hdr_path) as f: src = f.read()
 
 inject_decl = """
-// ── GPU HAL C-Airgap ─────────────────────────────────────────────────────────
+// ── GPU SWA Co-Processor Airgap ──────────────────────────────────────────────
 #include <cstdint>
 #include <vector>
 extern "C" void gpu_rns_mult_batch_wrapper(
@@ -41,7 +43,7 @@ new_op = """    DCRTPolyType& operator*=(const DCRTPolyType& rhs) override {
         size_t size{m_vectors.size()};
         uint32_t ring = m_params->GetRingDimension();
 
-        // ── GPU fast-path for large rings (bootstrapping workloads) ──────────
+        // ── SWA GPU Fast-Path ────────────────────────────────────────────────
         if (ring >= 4096 && size <= 32) {
             std::vector<const uint64_t*> a_ptrs(size);
             std::vector<const uint64_t*> b_ptrs(size);
@@ -50,18 +52,20 @@ new_op = """    DCRTPolyType& operator*=(const DCRTPolyType& rhs) override {
 
             for (size_t i = 0; i < size; ++i) {
                 moduli[i] = m_vectors[i].GetModulus().ConvertToInt();
-                // Zero-copy pointer extraction from OpenFHE underlying NativeVectors
+                // Extract raw host pointers for the SWA Cache
                 a_ptrs[i] = reinterpret_cast<const uint64_t*>(&m_vectors[i][0]);
                 b_ptrs[i] = reinterpret_cast<const uint64_t*>(&rhs.m_vectors[i][0]);
                 res_ptrs[i] = reinterpret_cast<uint64_t*>(&m_vectors[i][0]);
             }
 
+            // The HAL will check if these pointers exist in VRAM. 
+            // If they do, PCIe transfer is SKIPPED!
             ::gpu_rns_mult_batch_wrapper(a_ptrs.data(), b_ptrs.data(), res_ptrs.data(),
                                          moduli.data(), ring, (uint32_t)size);
             return *this;
         }
 
-        // ── CPU fallback ─────────────────────────────────────────────────────
+        // ── CPU Fallback ─────────────────────────────────────────────────────
 #pragma omp parallel for num_threads(OpenFHEParallelControls.GetThreadLimit(size))
         for (size_t i = 0; i < size; ++i)
             m_vectors[i] *= rhs.m_vectors[i];
@@ -76,9 +80,10 @@ pattern = re.compile(
 match = pattern.search(src)
 if match:
     src = src[:match.start()] + new_op + src[match.end():]
-    print("[+] operator*= patched with async batched GPU execution")
+    print("[+] OpenFHE operator*= dynamically hooked to SWA GPU Cache")
 else:
-    print("[-] operator*= pattern not found. It may already be patched.")
+    print("[-] operator*= pattern not found. May already be patched.")
 
 with open(hdr_path, "w") as f: f.write(src)
-print("[+] dcrtpoly.h written")
+print("[+] OpenFHE core successfully injected.")
+print("======================================================")
