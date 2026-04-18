@@ -15,21 +15,34 @@
 
 extern "C" void LaunchRNSMult(const uint64_t* a, const uint64_t* b, uint64_t* r,
                                uint64_t q, uint32_t n, cudaStream_t s);
+extern "C" void LaunchRNSMultMontgomery(const uint64_t* a, const uint64_t* b, uint64_t* r,
+                                         uint64_t q, uint64_t q_inv, uint64_t R2,
+                                         uint32_t n, cudaStream_t s);
 extern "C" void LaunchNTT(uint64_t* x, const uint64_t* tw,
                            uint64_t q, uint32_t n, cudaStream_t s);
 extern "C" void LaunchINTT(uint64_t* x, const uint64_t* tw_inv,
                             uint64_t q, uint32_t n, uint64_t n_inv, cudaStream_t s);
 
+// ── CPU Precomputations for Montgomery ────────────────────────────────────────
+static uint64_t calc_q_inv(uint64_t q) {
+    uint64_t inv = q;
+    for (int i = 0; i < 5; ++i) inv *= 2 - q * inv;
+    return -inv; // -q^{-1} mod 2^64
+}
+
+static uint64_t calc_R2(uint64_t q) {
+    // R = 2^64. We want R^2 mod q.
+    unsigned __int128 R = ((unsigned __int128)1 << 64) % q;
+    return (uint64_t)((R * R) % q);
+}
+
 // ── Pool configuration ────────────────────────────────────────────────────────
-// 3 device buffers per OMP thread (a, b, r), 8 threads = 24 slots minimum.
-// We use 48 to allow headroom for batch calls that pipeline multiple towers.
-// Slot size = largest ring we expect: 32768 coefficients * 8 bytes = 256 KB.
-static constexpr uint32_t POOL_SLOTS     = 48;
 static constexpr uint32_t MAX_RING       = 32768;
 static constexpr size_t   POOL_SLOT_BYTES = MAX_RING * sizeof(uint64_t);
 
 static void EnsurePool() {
-    openfhe_cuda::VRAMPool::Instance().Init(POOL_SLOTS, POOL_SLOT_BYTES);
+    // Calling Init with just 1 argument, matching your updated vram_pool.h
+    openfhe_cuda::VRAMPool::Instance().Init(POOL_SLOT_BYTES);
     openfhe_cuda::StreamPool::Instance().Init(32);
 }
 
@@ -71,7 +84,7 @@ static const DeviceTwiddles& GetDeviceTwiddles(uint64_t q, uint32_t N) {
     return g_tw_cache[key];
 }
 
-// ── Pointwise RNS multiply — pool-backed, zero dynamic allocation ─────────────
+// ── Montgomery RNS multiply Wrappers ──────────────────────────────────────────
 extern "C" void gpu_rns_mult_wrapper(
     const uint64_t* ha, const uint64_t* hb, uint64_t* hr,
     uint64_t q, uint64_t /*unused*/, uint32_t ring, uint32_t tower_idx)
@@ -83,13 +96,17 @@ extern "C" void gpu_rns_mult_wrapper(
     size_t bytes = ring * sizeof(uint64_t);
     cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(tower_idx);
 
+    uint64_t q_inv = calc_q_inv(q);
+    uint64_t R2 = calc_R2(q);
+
     openfhe_cuda::VRAMSlot da, db, dr;
     CUDA_CHECK(cudaMemcpyAsync(da.ptr, ha, bytes, cudaMemcpyHostToDevice, s));
     CUDA_CHECK(cudaMemcpyAsync(db.ptr, hb, bytes, cudaMemcpyHostToDevice, s));
-    LaunchRNSMult(da.ptr, db.ptr, dr.ptr, q, ring, s);
+    
+    LaunchRNSMultMontgomery(da.ptr, db.ptr, dr.ptr, q, q_inv, R2, ring, s);
+    
     CUDA_CHECK(cudaStreamSynchronize(s));
     CUDA_CHECK(cudaMemcpy(hr, dr.ptr, bytes, cudaMemcpyDeviceToHost));
-    // VRAMSlot destructors return da, db, dr to pool here
 }
 
 extern "C" void gpu_rns_mult_batch_wrapper(
@@ -104,16 +121,20 @@ extern "C" void gpu_rns_mult_batch_wrapper(
 
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
+        uint64_t q_inv = calc_q_inv(q[i]);
+        uint64_t R2 = calc_R2(q[i]);
+
         openfhe_cuda::VRAMSlot da, db, dr;
         CUDA_CHECK(cudaMemcpyAsync(da.ptr, ha[i], bytes, cudaMemcpyHostToDevice, s));
         CUDA_CHECK(cudaMemcpyAsync(db.ptr, hb[i], bytes, cudaMemcpyHostToDevice, s));
-        LaunchRNSMult(da.ptr, db.ptr, dr.ptr, q[i], ring, s);
+        
+        LaunchRNSMultMontgomery(da.ptr, db.ptr, dr.ptr, q[i], q_inv, R2, ring, s);
+        
         CUDA_CHECK(cudaStreamSynchronize(s));
         CUDA_CHECK(cudaMemcpy(hr[i], dr.ptr, bytes, cudaMemcpyDeviceToHost));
     }
 }
 
-// ── Polynomial convolution: NTT -> pointwise mult -> INTT ─────────────────────
 extern "C" void gpu_poly_mult_wrapper(
     const uint64_t** ha, const uint64_t** hb, uint64_t** hr,
     const uint64_t* q, uint32_t ring, uint32_t num_towers)
@@ -127,6 +148,9 @@ extern "C" void gpu_poly_mult_wrapper(
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
         const DeviceTwiddles& dt = GetDeviceTwiddles(q[i], ring);
+        
+        uint64_t q_inv = calc_q_inv(q[i]);
+        uint64_t R2 = calc_R2(q[i]);
 
         openfhe_cuda::VRAMSlot da, db, dr;
         CUDA_CHECK(cudaMemcpyAsync(da.ptr, ha[i], bytes, cudaMemcpyHostToDevice, s));
@@ -134,7 +158,9 @@ extern "C" void gpu_poly_mult_wrapper(
 
         LaunchNTT(da.ptr, dt.d_fwd, q[i], ring, s);
         LaunchNTT(db.ptr, dt.d_fwd, q[i], ring, s);
-        LaunchRNSMult(da.ptr, db.ptr, dr.ptr, q[i], ring, s);
+        
+        LaunchRNSMultMontgomery(da.ptr, db.ptr, dr.ptr, q[i], q_inv, R2, ring, s);
+        
         LaunchINTT(dr.ptr, dt.d_inv, q[i], ring, dt.n_inv, s);
 
         CUDA_CHECK(cudaStreamSynchronize(s));
