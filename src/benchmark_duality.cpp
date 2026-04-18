@@ -265,8 +265,9 @@ int main() {
         else       {cout<<"[-] GPU negacyclic NTT FAILED\n"; global_ok=false;}
     }
 
-    // ── TEST 3: throughput benchmark ──────────────────────────────────────────
-    cout<<"\n[TEST 3] Throughput benchmark (N="<<N<<", "<<NUM_TOWERS<<" towers)\n";
+
+    // ── TEST 3: pointwise RNS throughput (N=32768) ───────────────────────────
+    cout<<"\n[TEST 3] Pointwise RNS throughput (N=32768, 16 towers)\n";
     {
         mt19937_64 rng(42);
         vector<vector<uint64_t>> A(NUM_TOWERS,vector<uint64_t>(N));
@@ -275,17 +276,80 @@ int main() {
         for(int t=0;t<NUM_TOWERS;t++){uint64_t q=primes[t];for(uint32_t k=0;k<N;k++){A[t][k]=rng()%q;B[t][k]=rng()%q;}}
         vector<const uint64_t*> pA(NUM_TOWERS),pB(NUM_TOWERS); vector<uint64_t*> pR(NUM_TOWERS);
         for(int t=0;t<NUM_TOWERS;t++){pA[t]=A[t].data();pB[t]=B[t].data();pR[t]=R[t].data();}
-
-        // Warmup.
         gpu_rns_mult_batch_wrapper(pA.data(),pB.data(),pR.data(),primes.data(),N,NUM_TOWERS);
-
         const int ITERS=20;
         auto ts=clk::now();
         for(int i=0;i<ITERS;i++)
             gpu_rns_mult_batch_wrapper(pA.data(),pB.data(),pR.data(),primes.data(),N,NUM_TOWERS);
         double ms=chrono::duration<double,milli>(clk::now()-ts).count()/ITERS;
-        printf("  Pointwise RNS:  %.2f ms/op  (%.1f M coeff-mults/s)\n",
+        printf("  RNS N=32768:  %.2f ms/op  (%.1f M coeff-mults/s)\n",
                ms, (double)(NUM_TOWERS*N)/(ms*1e3));
+    }
+
+    // ── TEST 4: large-ring RNS throughput (N=65536) ──────────────────────────
+    cout<<"\n[TEST 4] Large-ring pointwise RNS throughput (N=65536, 16 towers)\n";
+    {
+        uint32_t Nbig = 65536;
+        auto big_primes = gen_negacyclic_ntt_primes(Nbig, NUM_TOWERS);
+        mt19937_64 rng(99);
+        vector<vector<uint64_t>> A(NUM_TOWERS,vector<uint64_t>(Nbig));
+        vector<vector<uint64_t>> B(NUM_TOWERS,vector<uint64_t>(Nbig));
+        vector<vector<uint64_t>> R(NUM_TOWERS,vector<uint64_t>(Nbig,0));
+        for(int t=0;t<NUM_TOWERS;t++){uint64_t q=big_primes[t];for(uint32_t k=0;k<Nbig;k++){A[t][k]=rng()%q;B[t][k]=rng()%q;}}
+        vector<const uint64_t*> pA(NUM_TOWERS),pB(NUM_TOWERS); vector<uint64_t*> pR(NUM_TOWERS);
+        for(int t=0;t<NUM_TOWERS;t++){pA[t]=A[t].data();pB[t]=B[t].data();pR[t]=R[t].data();}
+        // warmup
+        gpu_rns_mult_batch_wrapper(pA.data(),pB.data(),pR.data(),big_primes.data(),Nbig,NUM_TOWERS);
+        const int ITERS=10;
+        auto ts=clk::now();
+        for(int i=0;i<ITERS;i++)
+            gpu_rns_mult_batch_wrapper(pA.data(),pB.data(),pR.data(),big_primes.data(),Nbig,NUM_TOWERS);
+        double ms=chrono::duration<double,milli>(clk::now()-ts).count()/ITERS;
+        printf("  RNS N=65536:  %.2f ms/op  (%.1f M coeff-mults/s)\n",
+               ms, (double)(NUM_TOWERS*Nbig)/(ms*1e3));
+    }
+
+    // ── TEST 5: NTT poly multiply throughput (N=32768) ────────────────────────
+    cout<<"\n[TEST 5] NTT polynomial multiply throughput (N=32768, 16 towers)\n";
+    {
+        mt19937_64 rng(77);
+        vector<vector<uint64_t>> A(NUM_TOWERS,vector<uint64_t>(N));
+        vector<vector<uint64_t>> B(NUM_TOWERS,vector<uint64_t>(N));
+        vector<vector<uint64_t>> R(NUM_TOWERS,vector<uint64_t>(N,0));
+        for(int t=0;t<NUM_TOWERS;t++){uint64_t q=primes[t];for(uint32_t k=0;k<N;k++){A[t][k]=rng()%q;B[t][k]=rng()%q;}}
+        vector<const uint64_t*> pA(NUM_TOWERS),pB(NUM_TOWERS); vector<uint64_t*> pR(NUM_TOWERS);
+        for(int t=0;t<NUM_TOWERS;t++){pA[t]=A[t].data();pB[t]=B[t].data();pR[t]=R[t].data();}
+        // warmup
+        gpu_poly_mult_wrapper(pA.data(),pB.data(),pR.data(),primes.data(),N,NUM_TOWERS);
+        const int ITERS=10;
+        auto ts=clk::now();
+        for(int i=0;i<ITERS;i++)
+            gpu_poly_mult_wrapper(pA.data(),pB.data(),pR.data(),primes.data(),N,NUM_TOWERS);
+        double ms=chrono::duration<double,milli>(clk::now()-ts).count()/ITERS;
+        printf("  NTT poly mult N=32768:  %.2f ms/op  (%.1f M coeff-mults/s)\n",
+               ms, (double)(NUM_TOWERS*N)/(ms*1e3));
+    }
+
+    // ── TEST 6: NTT poly multiply throughput (N=65536) ───────────────────────
+    cout<<"\n[TEST 6] NTT polynomial multiply throughput (N=65536, 16 towers)\n";
+    {
+        uint32_t Nbig = 65536;
+        auto big_primes = gen_negacyclic_ntt_primes(Nbig, NUM_TOWERS);
+        mt19937_64 rng(55);
+        vector<vector<uint64_t>> A(NUM_TOWERS,vector<uint64_t>(Nbig));
+        vector<vector<uint64_t>> B(NUM_TOWERS,vector<uint64_t>(Nbig));
+        vector<vector<uint64_t>> R(NUM_TOWERS,vector<uint64_t>(Nbig,0));
+        for(int t=0;t<NUM_TOWERS;t++){uint64_t q=big_primes[t];for(uint32_t k=0;k<Nbig;k++){A[t][k]=rng()%q;B[t][k]=rng()%q;}}
+        vector<const uint64_t*> pA(NUM_TOWERS),pB(NUM_TOWERS); vector<uint64_t*> pR(NUM_TOWERS);
+        for(int t=0;t<NUM_TOWERS;t++){pA[t]=A[t].data();pB[t]=B[t].data();pR[t]=R[t].data();}
+        gpu_poly_mult_wrapper(pA.data(),pB.data(),pR.data(),big_primes.data(),Nbig,NUM_TOWERS);
+        const int ITERS=10;
+        auto ts=clk::now();
+        for(int i=0;i<ITERS;i++)
+            gpu_poly_mult_wrapper(pA.data(),pB.data(),pR.data(),big_primes.data(),Nbig,NUM_TOWERS);
+        double ms=chrono::duration<double,milli>(clk::now()-ts).count()/ITERS;
+        printf("  NTT poly mult N=65536:  %.2f ms/op  (%.1f M coeff-mults/s)\n",
+               ms, (double)(NUM_TOWERS*Nbig)/(ms*1e3));
     }
 
     cout<<"\n======================================================\n";

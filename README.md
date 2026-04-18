@@ -1,56 +1,61 @@
 # OpenFHE NVIDIA GPU HAL
 
-A CUDA Hardware Abstraction Layer that accelerates [OpenFHE](https://github.com/openfheorg/openfhe-development) CKKS/BGV schemes by offloading RNS polynomial multiplications and Number Theoretic Transforms (NTTs) to the GPU using exact 128-bit modular arithmetic.
+A CUDA Hardware Abstraction Layer that accelerates OpenFHE's RNS polynomial
+arithmetic on NVIDIA GPUs. Targets CKKS bootstrapping for ML workloads.
 
-## What it does
+## What's in here
 
-- **Dynamic Hooking:** Intercepts `DCRTPolyImpl::operator*=` in OpenFHE's core via a one-time patch.
-- **Selective Offloading:** Routes ring dimension ≥ 4096 multiplications to the GPU, falling back to the CPU for smaller rings.
-- **Exact Mathematics:** Uses exact `uint128 % modulus` — zero Barrett approximation error, ensuring strict cryptologic noise budget integrity.
-- **Thread-Safe Concurrency:** Utilizes explicit asynchronous CUDA streams per RNS tower, backed by race-free per-call VRAM allocation (`cudaMalloc`/`cudaFree`) and stream synchronization to cleanly support OpenMP threading.
-- **Native GPU NTT:** Implements Cooley-Tukey Decimation-In-Time (DIT) algorithms with explicit bit-reversal permutations and mathematically strict cyclic primitive $N$-th roots.
+| Path | Purpose |
+|------|---------|
+| `include/` | Public headers (cuda_hal.h, vram_pool.h, stream_pool.h, twiddle_gen.h) |
+| `kernels/cuda_math.cu` | Montgomery RNS multiply kernel |
+| `kernels/cuda_ntt.cu` | Negacyclic NTT / INTT kernels (pre/post twist + cyclic stages) |
+| `src/cuda_hal.cpp` | Host-side HAL: batch RNS multiply, poly multiply via NTT |
+| `src/twiddle_gen.cpp` | Negacyclic twiddle table builder (2N layout: twist section + cyclic section) |
+| `src/benchmark_duality.cpp` | Correctness + throughput benchmark |
+| `patch_openfhe.py` | Patches OpenFHE core to call the GPU HAL for EvalMult |
+| `CMakeLists.txt` | Build system |
 
-## Prerequisites
+## Hardware tested
 
-- NVIDIA GPU (Ampere or newer recommended)
-- CUDA Toolkit 11.0+ (`nvcc --version` to check)
-- OpenFHE v1.5.x (`git clone https://github.com/openfheorg/openfhe-development`)
-- CMake 3.18+, GCC 11+
+- NVIDIA GeForce RTX 2060 Max-Q (6 GB, Turing/SM75)
+- CUDA 13.2, GCC 13.3, Ubuntu 24 (WSL2)
 
-## Build & Verify
+## Performance (RTX 2060 Max-Q)
 
-### 1. Build the HAL
+| Operation | N | Towers | Throughput |
+|-----------|---|--------|-----------|
+| Pointwise RNS multiply | 32768 | 16 | ~69 M coeff-mults/s |
+| NTT poly multiply | 32768 | 16 | via gpu_poly_mult_wrapper |
+
+## Build
 
 ```bash
-git clone [https://github.com/samfrazerdutton/openfheNVDIA-GPU](https://github.com/samfrazerdutton/openfheNVDIA-GPU)
-cd openfheNVDIA-GPU
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
-2. Run the Duality-Grade Verification Engine
-Before integrating with OpenFHE, verify hardware consistency, CPU-to-GPU exactness, and OMP thread-safety:
+LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH ./benchmark_duality
+```
 
-Bash
-./benchmark_duality
-Expect to see [PASS] All tests passed confirming the NTT trace and pointwise multipliers.
+## Integrate with OpenFHE
 
-OpenFHE Integration
-3. Patch OpenFHE
-Inject the co-processor airgap into OpenFHE's core:
-
-Bash
-# From the openfheNVDIA-GPU root directory:
+```bash
 python3 patch_openfhe.py /path/to/openfhe-development
-4. Rebuild OpenFHE
-Bash
 cd /path/to/openfhe-development/build
-cmake .. -DBUILD_EXAMPLES=ON
-make -j$(nproc)
-5. Make the library permanently discoverable
-Bash
-echo "/path/to/openfheNVDIA-GPU/build" | sudo tee /etc/ld.so.conf.d/openfhe-cuda.conf
-sudo ldconfig
-6. Run an OpenFHE Bootstrapping Example
-Bash
-cd /path/to/openfhe-development/build
+cmake .. -DBUILD_EXAMPLES=ON && make -j$(nproc)
 ./bin/examples/pke/simple-ckks-bootstrapping
+```
+
+## Twiddle table layout
+
+Forward and inverse tables are each `2*N` entries:
+- `[0..N-1]` — psi^k / psi_inv^k for pre/post twist
+- `[N..2N-1]` — w^j / w_inv^j (w = psi^2) for cyclic NTT stages
+
+## Status
+
+- [x] Pointwise RNS multiply (Montgomery, multi-tower, concurrent streams)
+- [x] Negacyclic NTT polynomial multiply (GPU matches CPU reference exactly)
+- [x] OpenFHE CKKS bootstrapping verified end-to-end
+- [ ] Larger ring benchmarks (N=65536, N=131072)
+- [ ] Full OpenFHE EvalMult hook (replace CPU path)
