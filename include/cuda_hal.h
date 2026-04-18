@@ -8,11 +8,9 @@ namespace openfhe_cuda {
 
 class CUDAMathHAL {
 public:
-    // SWA cache (thread-local, used by OpenFHE patch)
     static uint64_t* GetOrAllocateDevicePtr(const void* host_ptr, uint32_t size_bytes, cudaStream_t stream);
     static void ClearShadowCache();
 
-    // Legacy pool API (used by benchmark.cpp and main_gpu_engine.cpp)
     static void AllocateVRAM(std::vector<uint64_t*>& ptrs, uint32_t towers, uint32_t ring);
     static void FreeVRAM(std::vector<uint64_t*>& ptrs);
     static void EvalMultRNS(
@@ -28,3 +26,4 @@ public:
 };
 
 } // namespace openfhe_cuda
+

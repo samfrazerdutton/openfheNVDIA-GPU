@@ -34,3 +34,4 @@ private:
 };
 
 } // namespace openfhe_cuda
+
