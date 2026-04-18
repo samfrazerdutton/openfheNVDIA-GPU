@@ -58,3 +58,11 @@ extern "C" void LaunchRNSMultMontgomery(
     uint32_t blocks = (n + 255) / 256;
     rns_mult_montgomery_kernel<<<blocks, 256, 0, stream>>>(d_a, d_b, d_res, q, q_inv, R2, n);
 }
+
+extern "C" void LaunchRNSMultBarrett(
+    const uint64_t* d_a, const uint64_t* d_b, uint64_t* d_res,
+    uint64_t mod, uint64_t mu_hi, uint32_t n, cudaStream_t stream)
+{
+    uint32_t blocks = (n + 255) / 256;
+    rns_mult_exact_kernel<<<blocks, 256, 0, stream>>>(d_a, d_b, d_res, mod, n);
+}
