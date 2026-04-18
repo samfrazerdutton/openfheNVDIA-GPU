@@ -1,7 +1,10 @@
 #include "cuda_hal.h"
+#include "stream_pool.h"
+#include "twiddle_gen.h"
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <mutex>
 #include <cuda_runtime.h>
 
 #define CUDA_CHECK(call) \
@@ -11,119 +14,120 @@
 
 extern "C" void LaunchRNSMult(const uint64_t* a, const uint64_t* b, uint64_t* r,
                                uint64_t q, uint32_t n, cudaStream_t s);
-extern "C" void LaunchNTT(uint64_t* x, const uint64_t* t,
+extern "C" void LaunchNTT(uint64_t* x, const uint64_t* tw,
                            uint64_t q, uint32_t n, cudaStream_t s);
+extern "C" void LaunchINTT(uint64_t* x, const uint64_t* tw_inv,
+                            uint64_t q, uint32_t n, uint64_t n_inv, cudaStream_t s);
 
-namespace openfhe_cuda {
-
-// ── Thread-local SWA cache (used by OpenFHE operator*= patch) ────────────────
-thread_local std::unordered_map<const void*, uint64_t*> tl_vram_shadow_map;
-
-uint64_t* CUDAMathHAL::GetOrAllocateDevicePtr(const void* host_ptr,
-                                               uint32_t bytes,
-                                               cudaStream_t s) {
-    auto it = tl_vram_shadow_map.find(host_ptr);
-    if (it == tl_vram_shadow_map.end()) {
-        uint64_t* d_ptr;
-        CUDA_CHECK(cudaMallocAsync(&d_ptr, bytes, s));
-        CUDA_CHECK(cudaMemcpyAsync(d_ptr, host_ptr, bytes,
-                                   cudaMemcpyHostToDevice, s));
-        tl_vram_shadow_map[host_ptr] = d_ptr;
-        return d_ptr;
+// ── Twiddle cache: built once per (q,N) pair, shared across all threads ───────
+struct TwKey {
+    uint64_t q; uint32_t N;
+    bool operator==(const TwKey& o) const { return q==o.q && N==o.N; }
+};
+struct TwKeyHash {
+    size_t operator()(const TwKey& k) const {
+        return std::hash<uint64_t>()(k.q) ^ (std::hash<uint32_t>()(k.N) << 32);
     }
-    return it->second;
+};
+
+struct DeviceTwiddles {
+    uint64_t* d_fwd  = nullptr;
+    uint64_t* d_inv  = nullptr;
+    uint64_t  n_inv  = 0;
+    uint32_t  N      = 0;
+};
+
+static std::unordered_map<TwKey, DeviceTwiddles, TwKeyHash> g_tw_cache;
+static std::mutex g_tw_mu;
+
+static const DeviceTwiddles& GetDeviceTwiddles(uint64_t q, uint32_t N) {
+    TwKey key{q, N};
+    std::lock_guard<std::mutex> lk(g_tw_mu);
+    auto it = g_tw_cache.find(key);
+    if (it != g_tw_cache.end()) return it->second;
+
+    TwiddleTable tt = BuildTwiddleTable(q, N);
+    DeviceTwiddles dt;
+    dt.N     = N;
+    dt.n_inv = tt.n_inv;
+    size_t bytes = (N / 2) * sizeof(uint64_t);
+    CUDA_CHECK(cudaMalloc(&dt.d_fwd, bytes));
+    CUDA_CHECK(cudaMalloc(&dt.d_inv, bytes));
+    CUDA_CHECK(cudaMemcpy(dt.d_fwd, tt.forward.data(), bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dt.d_inv, tt.inverse.data(), bytes, cudaMemcpyHostToDevice));
+    g_tw_cache[key] = dt;
+    return g_tw_cache[key];
 }
 
-void CUDAMathHAL::ClearShadowCache() {
-    for (auto& pair : tl_vram_shadow_map)
-        cudaFree(pair.second);
-    tl_vram_shadow_map.clear();
+// ── Pointwise RNS multiply — no shadow map, fresh alloc per call ──────────────
+extern "C" void gpu_rns_mult_wrapper(
+    const uint64_t* ha, const uint64_t* hb, uint64_t* hr,
+    uint64_t q, uint64_t /*modulus_unused*/, uint32_t ring, uint32_t tower_idx)
+{
+    openfhe_cuda::StreamPool::Instance().Init(32);
+    cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(tower_idx);
+
+    size_t bytes = ring * sizeof(uint64_t);
+    uint64_t *da = nullptr, *db = nullptr, *dr = nullptr;
+    CUDA_CHECK(cudaMalloc(&da, bytes));
+    CUDA_CHECK(cudaMalloc(&db, bytes));
+    CUDA_CHECK(cudaMalloc(&dr, bytes));
+    CUDA_CHECK(cudaMemcpyAsync(da, ha, bytes, cudaMemcpyHostToDevice, s));
+    CUDA_CHECK(cudaMemcpyAsync(db, hb, bytes, cudaMemcpyHostToDevice, s));
+    LaunchRNSMult(da, db, dr, q, ring, s);
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    CUDA_CHECK(cudaMemcpy(hr, dr, bytes, cudaMemcpyDeviceToHost));
+    cudaFree(da); cudaFree(db); cudaFree(dr);
 }
 
-// ── Legacy pool API ───────────────────────────────────────────────────────────
-void CUDAMathHAL::AllocateVRAM(std::vector<uint64_t*>& ptrs,
-                                uint32_t towers, uint32_t ring) {
-    ptrs.resize(towers);
-    for (uint32_t i = 0; i < towers; i++)
-        CUDA_CHECK(cudaMalloc(&ptrs[i], ring * sizeof(uint64_t)));
-}
-
-void CUDAMathHAL::FreeVRAM(std::vector<uint64_t*>& ptrs) {
-    for (auto p : ptrs) if (p) cudaFree(p);
-    ptrs.clear();
-}
-
-void CUDAMathHAL::EvalMultRNS(const std::vector<uint64_t*>& d_a,
-                                const std::vector<uint64_t*>& d_b,
-                                std::vector<uint64_t*>&       d_res,
-                                const std::vector<uint64_t>&  moduli,
-                                uint32_t ring) {
-    uint32_t towers = (uint32_t)d_a.size();
-    for (uint32_t i = 0; i < towers; i++) {
-        cudaStream_t s;
-        CUDA_CHECK(cudaStreamCreate(&s));
-        LaunchRNSMult(d_a[i], d_b[i], d_res[i], moduli[i], ring, s);
-        CUDA_CHECK(cudaStreamDestroy(s));
-    }
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-} // namespace openfhe_cuda
-
-// ── C wrappers called by OpenFHE patch and benchmarks ────────────────────────
 extern "C" void gpu_rns_mult_batch_wrapper(
     const uint64_t** ha, const uint64_t** hb, uint64_t** hr,
-    const uint64_t* q, uint32_t n, uint32_t t)
+    const uint64_t* q, uint32_t ring, uint32_t num_towers)
 {
-    for (uint32_t i = 0; i < t; ++i) {
-        cudaStream_t s;
-        cudaStreamCreate(&s);
-        uint64_t* da = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(ha[i], n*8, s);
-        uint64_t* db = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(hb[i], n*8, s);
-        uint64_t* dr = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(hr[i], n*8, s);
-        LaunchRNSMult(da, db, dr, q[i], n, s);
-        cudaMemcpyAsync(hr[i], dr, n*8, cudaMemcpyDeviceToHost, s);
-        cudaStreamSynchronize(s);
-        cudaStreamDestroy(s);
+    openfhe_cuda::StreamPool::Instance().Init(32);
+    size_t bytes = ring * sizeof(uint64_t);
+
+    for (uint32_t i = 0; i < num_towers; i++) {
+        cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
+        uint64_t *da = nullptr, *db = nullptr, *dr = nullptr;
+        CUDA_CHECK(cudaMalloc(&da, bytes));
+        CUDA_CHECK(cudaMalloc(&db, bytes));
+        CUDA_CHECK(cudaMalloc(&dr, bytes));
+        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
+        LaunchRNSMult(da, db, dr, q[i], ring, s);
+        CUDA_CHECK(cudaStreamSynchronize(s));
+        CUDA_CHECK(cudaMemcpy(hr[i], dr, bytes, cudaMemcpyDeviceToHost));
+        cudaFree(da); cudaFree(db); cudaFree(dr);
     }
 }
 
-extern "C" void gpu_ntt_mult_intt_pipeline(
+// ── Polynomial convolution: NTT -> pointwise mult -> INTT ────────────────────
+extern "C" void gpu_poly_mult_wrapper(
     const uint64_t** ha, const uint64_t** hb, uint64_t** hr,
-    const uint64_t** ht, const uint64_t* q, uint32_t n, uint32_t t)
+    const uint64_t* q, uint32_t ring, uint32_t num_towers)
 {
-    for (uint32_t i = 0; i < t; ++i) {
-        cudaStream_t s;
-        cudaStreamCreate(&s);
-        uint64_t* da = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(ha[i], n*8, s);
-        uint64_t* db = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(hb[i], n*8, s);
-        uint64_t* dt = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(ht[i], n*8, s);
-        uint64_t* dr = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(hr[i], n*8, s);
-        LaunchNTT(da, dt, q[i], n, s);
-        LaunchNTT(db, dt, q[i], n, s);
-        LaunchRNSMult(da, db, dr, q[i], n, s);
-        cudaMemcpyAsync(hr[i], dr, n*8, cudaMemcpyDeviceToHost, s);
-        cudaStreamSynchronize(s);
-        cudaStreamDestroy(s);
+    openfhe_cuda::StreamPool::Instance().Init(32);
+    size_t bytes = ring * sizeof(uint64_t);
+
+    for (uint32_t i = 0; i < num_towers; i++) {
+        cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
+        const DeviceTwiddles& dt = GetDeviceTwiddles(q[i], ring);
+
+        uint64_t *da = nullptr, *db = nullptr, *dr = nullptr;
+        CUDA_CHECK(cudaMalloc(&da, bytes));
+        CUDA_CHECK(cudaMalloc(&db, bytes));
+        CUDA_CHECK(cudaMalloc(&dr, bytes));
+        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
+
+        LaunchNTT(da, dt.d_fwd, q[i], ring, s);
+        LaunchNTT(db, dt.d_fwd, q[i], ring, s);
+        LaunchRNSMult(da, db, dr, q[i], ring, s);
+        LaunchINTT(dr, dt.d_inv, q[i], ring, dt.n_inv, s);
+
+        CUDA_CHECK(cudaStreamSynchronize(s));
+        CUDA_CHECK(cudaMemcpy(hr[i], dr, bytes, cudaMemcpyDeviceToHost));
+        cudaFree(da); cudaFree(db); cudaFree(dr);
     }
-}
-
-// Called by bench_evalmult.cpp — mu_hi ignored, we use exact modulo
-extern "C" void gpu_rns_mult_wrapper(
-    const uint64_t* a, const uint64_t* b, uint64_t* res,
-    uint64_t q, uint64_t /*mu_hi*/, uint32_t ring, uint32_t /*tower_idx*/)
-{
-    cudaStream_t s;
-    cudaStreamCreate(&s);
-    uint64_t* da = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(a, ring*8, s);
-    uint64_t* db = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(b, ring*8, s);
-    uint64_t* dr = openfhe_cuda::CUDAMathHAL::GetOrAllocateDevicePtr(res, ring*8, s);
-    LaunchRNSMult(da, db, dr, q, ring, s);
-    cudaMemcpyAsync(res, dr, ring*8, cudaMemcpyDeviceToHost, s);
-    cudaStreamSynchronize(s);
-    cudaStreamDestroy(s);
-}
-
-extern "C" void gpu_synchronize_all() {
-    cudaDeviceSynchronize();
 }
