@@ -146,7 +146,7 @@ else:
         else:
             print("[ERROR] No operator*= pattern matched across all 3 variants.")
             print("        Manual inspection required:")
-            print(f"        grep -n 'operator\*=' {hdr_path}")
+            print(f"        grep -n 'operator*=' {hdr_path}")
             sys.exit(1)
 
 print("[+] Patch complete.")

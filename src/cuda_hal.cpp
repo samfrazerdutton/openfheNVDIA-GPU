@@ -19,11 +19,9 @@ extern "C" void LaunchRNSMultMontgomery(const uint64_t* a, const uint64_t* b, ui
                                          uint64_t q, uint64_t q_inv, uint64_t R2,
                                          uint32_t n, cudaStream_t s);
 extern "C" void LaunchNTT(uint64_t* x, const uint64_t* tw,
-                           uint64_t q, uint32_t n,
-                           const uint32_t* d_bit_rev, cudaStream_t s);
+                           uint64_t q, uint32_t n, cudaStream_t s);
 extern "C" void LaunchINTT(uint64_t* x, const uint64_t* tw_inv,
-                            uint64_t q, uint32_t n, uint64_t n_inv,
-                            const uint32_t* d_bit_rev, cudaStream_t s);
+                            uint64_t q, uint32_t n, uint64_t n_inv, cudaStream_t s);
 
 static uint64_t calc_q_inv(uint64_t q) {
     uint64_t inv = q;
@@ -36,8 +34,8 @@ static uint64_t calc_R2(uint64_t q) {
     return (uint64_t)((R * R) % q);
 }
 
-static constexpr uint32_t MAX_RING        = 65536;  // covers TEST 4/6 N=65536
-static constexpr size_t   POOL_SLOT_BYTES = MAX_RING * sizeof(uint64_t); // 512 KB/slot
+static constexpr uint32_t MAX_RING        = 65536;
+static constexpr size_t   POOL_SLOT_BYTES = MAX_RING * sizeof(uint64_t);
 
 static void EnsurePool() {
     openfhe_cuda::VRAMPool::Instance().Init(POOL_SLOT_BYTES);
@@ -54,11 +52,10 @@ struct TwKeyHash {
     }
 };
 struct DeviceTwiddles {
-    uint64_t* d_fwd     = nullptr;
-    uint64_t* d_inv     = nullptr;
-    uint32_t* d_bit_rev = nullptr;   // precomputed bit-reversal table on device
-    uint64_t  n_inv     = 0;
-    uint32_t  N         = 0;
+    uint64_t* d_fwd  = nullptr;
+    uint64_t* d_inv  = nullptr;
+    uint64_t  n_inv  = 0;
+    uint32_t  N      = 0;
 };
 
 struct TwiddleCache {
@@ -67,9 +64,8 @@ struct TwiddleCache {
 
     ~TwiddleCache() {
         for (auto& [k, dt] : map) {
-            if (dt.d_fwd)     cudaFree(dt.d_fwd);
-            if (dt.d_inv)     cudaFree(dt.d_inv);
-            if (dt.d_bit_rev) cudaFree(dt.d_bit_rev);
+            if (dt.d_fwd) cudaFree(dt.d_fwd);
+            if (dt.d_inv) cudaFree(dt.d_inv);
         }
     }
 };
@@ -86,15 +82,12 @@ static const DeviceTwiddles& GetDeviceTwiddles(uint64_t q, uint32_t N) {
     dt.N     = N;
     dt.n_inv = tt.n_inv;
 
-    // THE CRITICAL FIX: Allocate and copy 2*N elements (twist factors AND roots)
-    size_t bytes = 2 * N * sizeof(uint64_t); 
-    CUDA_CHECK(cudaMalloc(&dt.d_fwd, bytes));
-    CUDA_CHECK(cudaMalloc(&dt.d_inv, bytes));
-    CUDA_CHECK(cudaMemcpy(dt.d_fwd, tt.forward.data(), bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dt.d_inv, tt.inverse.data(), bytes, cudaMemcpyHostToDevice));
-    size_t rev_bytes = N * sizeof(uint32_t);
-    CUDA_CHECK(cudaMalloc(&dt.d_bit_rev, rev_bytes));
-    CUDA_CHECK(cudaMemcpy(dt.d_bit_rev, tt.bit_rev.data(), rev_bytes, cudaMemcpyHostToDevice));
+    // Twiddles are size 2N (Twist + Cyclic Roots)
+    size_t twiddle_bytes = 2 * N * sizeof(uint64_t); 
+    CUDA_CHECK(cudaMalloc(&dt.d_fwd, twiddle_bytes));
+    CUDA_CHECK(cudaMalloc(&dt.d_inv, twiddle_bytes));
+    CUDA_CHECK(cudaMemcpy(dt.d_fwd, tt.forward.data(), twiddle_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dt.d_inv, tt.inverse.data(), twiddle_bytes, cudaMemcpyHostToDevice));
 
     g_tw_cache.map[key] = dt;
     return g_tw_cache.map[key];
@@ -133,23 +126,19 @@ extern "C" void gpu_rns_mult_batch_wrapper(
     if (ring * sizeof(uint64_t) > POOL_SLOT_BYTES)
         throw std::runtime_error("[CUDA HAL] ring exceeds MAX_RING");
     
-    size_t bytes = ring * sizeof(uint64_t);
-    if (bytes > POOL_SLOT_BYTES)
-        throw std::runtime_error("[CUDA HAL] ring exceeds MAX_RING for VRAMPool");
-
+    size_t poly_bytes = ring * sizeof(uint64_t);
     std::vector<uint64_t*> da(num_towers), db(num_towers), dr(num_towers);
-    std::vector<openfhe_cuda::VRAMSlot> slot_a, slot_b, slot_r;
-    slot_a.reserve(num_towers); slot_b.reserve(num_towers); slot_r.reserve(num_towers);
+    
     for (uint32_t i = 0; i < num_towers; i++) {
-        slot_a.emplace_back(); da[i] = slot_a.back().ptr;
-        slot_b.emplace_back(); db[i] = slot_b.back().ptr;
-        slot_r.emplace_back(); dr[i] = slot_r.back().ptr;
+        CUDA_CHECK(cudaMalloc(&da[i], poly_bytes));
+        CUDA_CHECK(cudaMalloc(&db[i], poly_bytes));
+        CUDA_CHECK(cudaMalloc(&dr[i], poly_bytes));
     }
     
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
-        CUDA_CHECK(cudaMemcpyAsync(da[i], ha[i], bytes, cudaMemcpyHostToDevice, s));
-        CUDA_CHECK(cudaMemcpyAsync(db[i], hb[i], bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(da[i], ha[i], poly_bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(db[i], hb[i], poly_bytes, cudaMemcpyHostToDevice, s));
     }
     
     for (uint32_t i = 0; i < num_towers; i++) {
@@ -161,11 +150,14 @@ extern "C" void gpu_rns_mult_batch_wrapper(
     
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
-        CUDA_CHECK(cudaMemcpyAsync(hr[i], dr[i], bytes, cudaMemcpyDeviceToHost, s));
+        CUDA_CHECK(cudaMemcpyAsync(hr[i], dr[i], poly_bytes, cudaMemcpyDeviceToHost, s));
     }
     
     openfhe_cuda::StreamPool::Instance().SyncAll();
-    // VRAMSlot RAII returns all slots to the pool automatically on scope exit.
+    
+    for (uint32_t i = 0; i < num_towers; i++) {
+        cudaFree(da[i]); cudaFree(db[i]); cudaFree(dr[i]);
+    }
 }
 
 extern "C" void gpu_poly_mult_wrapper(
@@ -176,30 +168,26 @@ extern "C" void gpu_poly_mult_wrapper(
     if (ring * sizeof(uint64_t) > POOL_SLOT_BYTES)
         throw std::runtime_error("[CUDA HAL] ring exceeds MAX_RING");
     
-    size_t bytes = ring * sizeof(uint64_t);
-    if (bytes > POOL_SLOT_BYTES)
-        throw std::runtime_error("[CUDA HAL] ring exceeds MAX_RING for VRAMPool");
-
+    size_t poly_bytes = ring * sizeof(uint64_t);
     std::vector<uint64_t*> da(num_towers), db(num_towers), dr(num_towers);
-    std::vector<openfhe_cuda::VRAMSlot> slot_a, slot_b, slot_r;
-    slot_a.reserve(num_towers); slot_b.reserve(num_towers); slot_r.reserve(num_towers);
+    
     for (uint32_t i = 0; i < num_towers; i++) {
-        slot_a.emplace_back(); da[i] = slot_a.back().ptr;
-        slot_b.emplace_back(); db[i] = slot_b.back().ptr;
-        slot_r.emplace_back(); dr[i] = slot_r.back().ptr;
+        CUDA_CHECK(cudaMalloc(&da[i], poly_bytes));
+        CUDA_CHECK(cudaMalloc(&db[i], poly_bytes));
+        CUDA_CHECK(cudaMalloc(&dr[i], poly_bytes));
     }
     
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
-        CUDA_CHECK(cudaMemcpyAsync(da[i], ha[i], bytes, cudaMemcpyHostToDevice, s));
-        CUDA_CHECK(cudaMemcpyAsync(db[i], hb[i], bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(da[i], ha[i], poly_bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(db[i], hb[i], poly_bytes, cudaMemcpyHostToDevice, s));
     }
     
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
         const DeviceTwiddles& dt = GetDeviceTwiddles(q[i], ring);
-        LaunchNTT(da[i], dt.d_fwd, q[i], ring, dt.d_bit_rev, s);
-        LaunchNTT(db[i], dt.d_fwd, q[i], ring, dt.d_bit_rev, s);
+        LaunchNTT(da[i], dt.d_fwd, q[i], ring, s);
+        LaunchNTT(db[i], dt.d_fwd, q[i], ring, s);
     }
     
     for (uint32_t i = 0; i < num_towers; i++) {
@@ -212,17 +200,22 @@ extern "C" void gpu_poly_mult_wrapper(
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
         const DeviceTwiddles& dt = GetDeviceTwiddles(q[i], ring);
-        LaunchINTT(dr[i], dt.d_inv, q[i], ring, dt.n_inv, dt.d_bit_rev, s);
+        LaunchINTT(dr[i], dt.d_inv, q[i], ring, dt.n_inv, s);
     }
     
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
-        CUDA_CHECK(cudaMemcpyAsync(hr[i], dr[i], bytes, cudaMemcpyDeviceToHost, s));
+        CUDA_CHECK(cudaMemcpyAsync(hr[i], dr[i], poly_bytes, cudaMemcpyDeviceToHost, s));
     }
     
     openfhe_cuda::StreamPool::Instance().SyncAll();
-    // VRAMSlot RAII returns all slots to the pool automatically on scope exit.
+    
+    for (uint32_t i = 0; i < num_towers; i++) {
+        cudaFree(da[i]); cudaFree(db[i]); cudaFree(dr[i]);
+    }
 }
+
+
 
 extern "C" void gpu_rns_mult_wrapper(const uint64_t* ha, const uint64_t* hb, uint64_t* hr, uint64_t q, uint64_t, uint32_t ring, uint32_t tower_idx) {
     const uint64_t* pA = ha; const uint64_t* pB = hb; uint64_t* pR = hr;

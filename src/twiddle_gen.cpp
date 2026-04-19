@@ -49,7 +49,7 @@ TwiddleTable BuildTwiddleTable(uint64_t q, uint32_t N) {
     TwiddleTable tt;
     tt.n_inv = n_inv;
     
-    // Allocate 2N: [0, N-1] for twist, [N, 1.5N-1] for cyclic DIT/DIF roots
+    // Allocate 2N: [0, N-1] for pre/post twist, [N, 1.5N-1] for cyclic roots
     tt.forward.resize(2 * N, 0);
     tt.inverse.resize(2 * N, 0);
 
@@ -62,7 +62,7 @@ TwiddleTable BuildTwiddleTable(uint64_t q, uint32_t N) {
         pkinv = (uint64_t)(((unsigned __int128)pkinv * psi_inv) % q);
     }
 
-    // 2. Standard Cyclic Roots (w^k)
+    // 2. Standard Cyclic Roots (w^k) in natural order for DIT/DIF strided access
     uint32_t N_half = N / 2;
     uint64_t wk = 1, wkinv = 1;
     for (uint32_t k = 0; k < N_half; k++) {
@@ -70,17 +70,6 @@ TwiddleTable BuildTwiddleTable(uint64_t q, uint32_t N) {
         tt.inverse[N + k] = wkinv;
         wk    = (uint64_t)(((unsigned __int128)wk * w) % q);
         wkinv = (uint64_t)(((unsigned __int128)wkinv * w_inv) % q);
-    }
-
-    // Precompute bit-reversal permutation so the GPU kernel can use a
-    // coalesced gather instead of per-thread bit-twiddling with warp divergence.
-    uint32_t log2N = 0;
-    while ((1u << log2N) < N) log2N++;
-    tt.bit_rev.resize(N);
-    for (uint32_t i = 0; i < N; i++) {
-        uint32_t rev = 0, v = i;
-        for (uint32_t k = 0; k < log2N; k++) { rev = (rev << 1) | (v & 1); v >>= 1; }
-        tt.bit_rev[i] = rev;
     }
 
     return tt;

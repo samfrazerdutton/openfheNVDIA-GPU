@@ -19,6 +19,7 @@ target_include_directories(openfhe_cuda_hal PUBLIC
 )
 target_link_libraries(openfhe_cuda_hal PRIVATE CUDA::cudart OpenMP::OpenMP_CXX)
 set_target_properties(openfhe_cuda_hal PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_compile_options(openfhe_cuda_hal PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math>)
 
 add_executable(benchmark_duality src/benchmark_duality.cpp)
 target_include_directories(benchmark_duality PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
