@@ -22,9 +22,10 @@ namespace openfhe_cuda {
 //
 // If you need more towers, call Init() with a larger num_slots override
 // or increase MAX_TOWERS_HINT below.
-static constexpr uint32_t MAX_TOWERS_HINT = 32;
-static constexpr uint32_t SLOTS_PER_TOWER = 3;
-static constexpr uint32_t POOL_BUFFER     = 8;
+static constexpr uint32_t MAX_TOWERS_HINT = 16;   // towers per call
+static constexpr uint32_t MAX_OMP_THREADS  = 8;    // match benchmark_duality
+static constexpr uint32_t SLOTS_PER_TOWER  = 3;    // a, b, result per tower
+static constexpr uint32_t POOL_BUFFER      = 16;   // headroom
 
 class VRAMPool {
 public:
@@ -43,7 +44,9 @@ public:
             initialised_ = false;
         }
 
-        uint32_t num_slots = MAX_TOWERS_HINT * SLOTS_PER_TOWER + POOL_BUFFER;
+        // Must cover worst case: all OMP threads simultaneously in-flight,
+        // each holding SLOTS_PER_TOWER slots for every tower in their batch.
+        uint32_t num_slots = MAX_OMP_THREADS * MAX_TOWERS_HINT * SLOTS_PER_TOWER + POOL_BUFFER;
 
         slot_bytes_ = slot_bytes;
         slots_.resize(num_slots, nullptr);

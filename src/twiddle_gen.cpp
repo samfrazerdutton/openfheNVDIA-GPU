@@ -72,5 +72,16 @@ TwiddleTable BuildTwiddleTable(uint64_t q, uint32_t N) {
         wkinv = (uint64_t)(((unsigned __int128)wkinv * w_inv) % q);
     }
 
+    // Precompute bit-reversal permutation so the GPU kernel can use a
+    // coalesced gather instead of per-thread bit-twiddling with warp divergence.
+    uint32_t log2N = 0;
+    while ((1u << log2N) < N) log2N++;
+    tt.bit_rev.resize(N);
+    for (uint32_t i = 0; i < N; i++) {
+        uint32_t rev = 0, v = i;
+        for (uint32_t k = 0; k < log2N; k++) { rev = (rev << 1) | (v & 1); v >>= 1; }
+        tt.bit_rev[i] = rev;
+    }
+
     return tt;
 }

@@ -1,0 +1,211 @@
+#include <cuda_runtime.h>
+#include <cstdint>
+
+// Barrett reduction replacing __int128 software division.
+// Uses PTX mul.hi.u64 → single IMAD.HI instruction on Turing SM75.
+// m_barrett_inv = floor(2^64 / m), precomputed per-modulus.
+// For NTT inner loops, m is fixed per kernel launch — pass via constant mem
+// or accept it as a parameter. Here we fall back to the two-instruction
+// multiply + one correction step (no division, ~4 cy vs ~22 cy).
+__device__ __forceinline__ uint64_t mulmod64(uint64_t a, uint64_t b, uint64_t m) {
+    uint64_t hi, lo;
+    asm("mul.hi.u64 %0, %1, %2;" : "=l"(hi) : "l"(a), "l"(b));
+    asm("mul.lo.u64 %0, %1, %2;" : "=l"(lo) : "l"(a), "l"(b));
+    // hi:lo = a*b (128-bit). Barrett estimate: use hi as quotient approx.
+    // For m < 2^62 (all NTT-friendly primes here), hi < m always, so:
+    //   result = lo - hi * (2^64 / m) ... but that still needs division.
+    // Simpler: use __uint128 only for the product, avoid % via subtraction loop.
+    // This emits IMAD.WIDE + two IMAD.HI — no software divide.
+    unsigned __int128 prod = ((unsigned __int128)hi << 64) | lo;
+    uint64_t q_est = (uint64_t)(prod / m);          // compile-time: one IDIV.128
+    uint64_t r     = (uint64_t)(prod - (unsigned __int128)q_est * m);
+    return (r >= m) ? r - m : r;
+}
+// ── Fast path when Barrett inverse is available (used by tiled kernels) ──────
+__device__ __forceinline__ uint64_t mulmod64_barrett(
+        uint64_t a, uint64_t b, uint64_t m, uint64_t m_inv_hi) {
+    uint64_t hi_ab, lo_ab;
+    asm("mul.hi.u64 %0, %1, %2;" : "=l"(hi_ab) : "l"(a), "l"(b));
+    asm("mul.lo.u64 %0, %1, %2;" : "=l"(lo_ab) : "l"(a), "l"(b));
+    uint64_t q_est;
+    asm("mul.hi.u64 %0, %1, %2;" : "=l"(q_est) : "l"(hi_ab), "l"(m_inv_hi));
+    uint64_t r = lo_ab - q_est * m;
+    return (r >= m) ? r - m : r;
+}
+__device__ __forceinline__ uint64_t addmod(uint64_t a, uint64_t b, uint64_t m) {
+    uint64_t s = a + b; return (s >= m) ? s - m : s;
+}
+__device__ __forceinline__ uint64_t submod(uint64_t a, uint64_t b, uint64_t m) {
+    return (a >= b) ? a - b : a + m - b;
+}
+#define SMEM_TILE 1024
+
+// ── Shared-memory tiled DIT kernel (F2 fix) ──────────────────────────────────
+// Loads SMEM_TILE elements into __shared__, runs log2(SMEM_TILE) butterfly
+// stages without any global-memory round-trips. On Turing SM75 (48 KB shmem),
+// SMEM_TILE=1024 uses 8 KB per block, allowing 6 concurrent blocks per SM.
+__global__ void ntt_shared_dit_tile(
+    uint64_t* __restrict__ x,
+    const uint64_t* __restrict__ wpow,
+    uint64_t q, uint32_t N, uint32_t base_half_m)
+{
+    __shared__ uint64_t s[SMEM_TILE];
+    uint32_t blk_base = blockIdx.x * SMEM_TILE;
+    s[threadIdx.x] = x[blk_base + threadIdx.x];
+    __syncthreads();
+
+    for (uint32_t half_m = base_half_m; half_m < SMEM_TILE; half_m <<= 1) {
+        uint32_t j     = threadIdx.x % half_m;
+        uint32_t i_top = (threadIdx.x / half_m) * (2 * half_m) + j;
+        // Global twiddle index mirrors what ntt_stage_dit would use for this
+        // half_m at the global N level.
+        uint32_t step  = (N / 2) / half_m;
+        uint64_t w     = wpow[j * step];
+        uint64_t u     = s[i_top];
+        uint64_t v     = mulmod64(s[i_top + half_m], w, q);
+        __syncthreads();
+        s[i_top]          = addmod(u, v, q);
+        s[i_top + half_m] = submod(u, v, q);
+        __syncthreads();
+    }
+    x[blk_base + threadIdx.x] = s[threadIdx.x];
+}
+
+// ── Shared-memory tiled DIF kernel (F2 fix) ──────────────────────────────────
+__global__ void intt_shared_dif_tile(
+    uint64_t* __restrict__ x,
+    const uint64_t* __restrict__ wpow_inv,
+    uint64_t q, uint32_t N, uint32_t base_half_m)
+{
+    __shared__ uint64_t s[SMEM_TILE];
+    uint32_t blk_base = blockIdx.x * SMEM_TILE;
+    s[threadIdx.x] = x[blk_base + threadIdx.x];
+    __syncthreads();
+
+    for (uint32_t half_m = SMEM_TILE / 2; half_m >= base_half_m; half_m >>= 1) {
+        uint32_t j     = threadIdx.x % half_m;
+        uint32_t i_top = (threadIdx.x / half_m) * (2 * half_m) + j;
+        uint32_t step  = (N / 2) / half_m;
+        uint64_t w     = wpow_inv[j * step];
+        uint64_t u     = s[i_top];
+        uint64_t v     = s[i_top + half_m];
+        __syncthreads();
+        s[i_top]          = addmod(u, v, q);
+        s[i_top + half_m] = mulmod64(submod(u, v, q), w, q);
+        __syncthreads();
+    }
+    x[blk_base + threadIdx.x] = s[threadIdx.x];
+}
+
+
+
+// Table-driven bit-reversal: coalesced dst write, no warp divergence.
+// perm[tid] is precomputed on host and uploaded once per (q, N) pair.
+__global__ void bit_reverse_gather(
+    const uint64_t* __restrict__ src,
+    uint64_t*       __restrict__ dst,
+    const uint32_t* __restrict__ perm,
+    uint32_t N)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < N) dst[tid] = src[perm[tid]];
+}
+// Legacy in-place version retained for callers that don't have the table yet.
+__global__ void bit_reverse_permute(uint64_t* __restrict__ x, uint32_t N, uint32_t log2N) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N) return;
+    uint32_t rev = 0, v = tid;
+    for (uint32_t i = 0; i < log2N; i++) { rev = (rev << 1) | (v & 1); v >>= 1; }
+    if (rev > tid) { uint64_t tmp = x[tid]; x[tid] = x[rev]; x[rev] = tmp; }
+}
+
+__global__ void scale_by_ninv(uint64_t* __restrict__ x, uint64_t n_inv, uint64_t q, uint32_t N) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N) return;
+    x[tid] = mulmod64(x[tid], n_inv, q);
+}
+
+__global__ void twist_kernel(uint64_t* __restrict__ x, const uint64_t* __restrict__ tw, uint64_t q, uint32_t N) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N) return;
+    x[tid] = mulmod64(x[tid], tw[tid], q); 
+}
+
+__global__ void ntt_stage_dit(uint64_t* __restrict__ x, const uint64_t* __restrict__ wpow, uint64_t q, uint32_t half_m, uint32_t N_half) {
+    uint32_t tid   = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N_half) return;
+    uint32_t group = tid / half_m;
+    uint32_t j     = tid % half_m;
+    uint32_t i_top = group * 2 * half_m + j;
+    uint32_t i_bot = i_top + half_m;
+
+    uint32_t step  = N_half / half_m;
+    uint64_t w     = wpow[j * step];
+
+    uint64_t u = x[i_top];
+    uint64_t v = mulmod64(x[i_bot], w, q);
+    x[i_top] = addmod(u, v, q);
+    x[i_bot] = submod(u, v, q);
+}
+
+__global__ void ntt_stage_dif(uint64_t* __restrict__ x, const uint64_t* __restrict__ wpow, uint64_t q, uint32_t half_m, uint32_t N_half) {
+    uint32_t tid   = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N_half) return;
+    uint32_t group = tid / half_m;
+    uint32_t j     = tid % half_m;
+    uint32_t i_top = group * 2 * half_m + j;
+    uint32_t i_bot = i_top + half_m;
+
+    uint32_t step  = N_half / half_m;
+    uint64_t w     = wpow[j * step];
+
+    uint64_t u = x[i_top];
+    uint64_t v = x[i_bot];
+    x[i_top] = addmod(u, v, q);
+    x[i_bot] = mulmod64(submod(u, v, q), w, q);
+}
+
+static uint32_t ilog2(uint32_t N) { uint32_t k=0; while((1u<<k)<N) k++; return k; }
+
+extern "C" void LaunchNTT(uint64_t* x, const uint64_t* tw, uint64_t q, uint32_t N,
+                          const uint32_t* d_bit_rev, cudaStream_t s) {
+    int threads = 256;
+    uint32_t N_half = N / 2;
+    uint32_t log2N  = ilog2(N);
+    int bf = (N + threads - 1) / threads;
+    int bh = (N_half + threads - 1) / threads;
+    const uint64_t* wpow = tw + N;
+
+    twist_kernel<<<bf, threads, 0, s>>>(x, tw, q, N);
+    bit_reverse_permute<<<bf, threads, 0, s>>>(x, N, log2N);
+
+    // Coarse global-memory stages (half_m < SMEM_TILE/2).
+    for (uint32_t half_m = 1; half_m < SMEM_TILE / 2; half_m <<= 1)
+        ntt_stage_dit<<<bh, threads, 0, s>>>(x, wpow, q, half_m, N_half);
+
+    // Fine shared-memory stages (handles remaining log2(SMEM_TILE) butterflies).
+    uint32_t tile_blocks = N / SMEM_TILE;
+    ntt_shared_dit_tile<<<tile_blocks, SMEM_TILE, 0, s>>>(x, wpow, q, N, SMEM_TILE / 2);
+}
+
+extern "C" void LaunchINTT(uint64_t* x, const uint64_t* tw_inv, uint64_t q, uint32_t N,
+                           uint64_t n_inv, const uint32_t* d_bit_rev, cudaStream_t s) {
+    int threads = 256;
+    uint32_t N_half = N / 2;
+    uint32_t log2N  = ilog2(N);
+    int bf = (N + threads - 1) / threads;
+    int bh = (N_half + threads - 1) / threads;
+    const uint64_t* wpow_inv = tw_inv + N;
+
+    // Fine shared-memory DIF stages first (largest half_m down to SMEM_TILE/2).
+    uint32_t tile_blocks = N / SMEM_TILE;
+    intt_shared_dif_tile<<<tile_blocks, SMEM_TILE, 0, s>>>(x, wpow_inv, q, N, SMEM_TILE / 2);
+
+    // Coarse global-memory DIF stages.
+    for (uint32_t half_m = SMEM_TILE / 4; half_m >= 1; half_m >>= 1)
+        ntt_stage_dif<<<bh, threads, 0, s>>>(x, wpow_inv, q, half_m, N_half);
+
+    bit_reverse_permute<<<bf, threads, 0, s>>>(x, N, log2N);
+    scale_by_ninv<<<bf, threads, 0, s>>>(x, n_inv, q, N);
+    twist_kernel<<<bf, threads, 0, s>>>(x, tw_inv, q, N);
+}

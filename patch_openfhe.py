@@ -106,22 +106,48 @@ else:
             src = re.sub(r'(#include\s+[<"][^>"]+[>"]\n)', r'\1' + gpu_decl, src, count=1)
 
         # Replace operator*=
-        pattern = re.compile(
-            r'DCRTPolyType\s*&\s*operator\*=\s*\(\s*const\s+DCRTPolyType\s*&\s*\w+\s*\)\s*override\s*\{'
-            r'.*?'
-            r'm_vectors\s*\[\s*i\s*\]\s*\*=\s*\w+\s*\.\s*m_vectors\s*\[\s*i\s*\]\s*;'
-            r'.*?'
-            r'\n\s*\}',
-            re.DOTALL
-        )
-        m = pattern.search(src)
+        # Try multiple patterns to handle OpenFHE 1.x and 2.x source layouts.
+        PATTERNS = [
+            # OpenFHE <= 1.1: simple #pragma omp for with direct *= in loop body
+            re.compile(
+                r'DCRTPolyType\s*&\s*operator\*=\s*\(\s*const\s+DCRTPolyType\s*&\s*\w+\s*\)\s*override\s*\{'
+                r'.*?'
+                r'm_vectors\s*\[\s*i\s*\]\s*\*=\s*\w+\.m_vectors\s*\[\s*i\s*\]\s*;'
+                r'.*?'
+                r'\n\s*\}',
+                re.DOTALL),
+            # OpenFHE >= 1.2: lambda-based parallel_for form
+            re.compile(
+                r'DCRTPolyType\s*&\s*operator\*=\s*\(\s*const\s+DCRTPolyType\s*&\s*\w+\s*\)\s*override\s*\{'
+                r'.*?'
+                r'ParallelFor\s*\(.*?m_vectors\s*\[\s*\w+\s*\]\s*\*=.*?\}\s*\)'
+                r'.*?'
+                r'\n\s*\}',
+                re.DOTALL),
+            # OpenFHE >= 1.3: std::transform variant
+            re.compile(
+                r'DCRTPolyType\s*&\s*operator\*=\s*\(\s*const\s+DCRTPolyType\s*&\s*\w+\s*\)\s*override\s*\{'
+                r'.*?'
+                r'std::transform\s*\('
+                r'.*?'
+                r'\n\s*\}',
+                re.DOTALL),
+        ]
+        m = None
+        for i, pat in enumerate(PATTERNS):
+            m = pat.search(src)
+            if m:
+                print(f"[+] operator*= matched by pattern {i+1}")
+                break
         if m:
             src = src[:m.start()] + new_op + src[m.end():]
             with open(hdr_path, "w") as f: f.write(src)
             print("[+] operator*= hooked to GPU HAL")
         else:
-            print("[-] operator*= pattern not found -- may need manual inspection")
-            print(f"    Header: {hdr_path}")
+            print("[ERROR] No operator*= pattern matched across all 3 variants.")
+            print("        Manual inspection required:")
+            print(f"        grep -n 'operator\*=' {hdr_path}")
+            sys.exit(1)
 
 print("[+] Patch complete.")
 print("    Rebuild OpenFHE: cd /path/to/openfhe-development/build && make -j$(nproc)")
