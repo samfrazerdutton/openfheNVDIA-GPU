@@ -4,15 +4,15 @@ High-performance CUDA abstraction layer for OpenFHE CKKS/BGV schemes, heavily op
 
 ## Technical Specifications
 - **Architecture:** Bypasses PCIe bottlenecks via asynchronous stream-ordered memory management.
-- **Arithmetic:** Branchless, PTX-safe 64-bit interleaved modular reduction ensuring exact polynomial convolutions.
+- **Arithmetic:** Branchless, PTX-safe 64-bit interleaved modular reduction ensuring exact polynomial convolutions without invoking unsupported `__int128` modulo instructions.
 - **Negacyclic NTT:** Implements a split-memory $2N$ twiddle layout ($N$ twist factors + $N$ cyclic roots) with an exact DIT Forward / DIF Inverse sequence.
-- **Performance:** Achieves ~69M coeff-mults/sec for RNS operations on consumer-grade laptop hardware.
+- **Performance:** Achieves up to ~65M coeff-mults/sec for RNS operations on consumer-grade laptop hardware.
 
 ## Verified Benchmarks (RTX 2060 Max-Q)
-- **Pointwise RNS (N=32768, 16 towers):** 9.88 ms/op
-- **Pointwise RNS (N=65536, 16 towers):** 16.05 ms/op
-- **NTT Poly Mult (N=32768, 16 towers):** 24.93 ms/op
-- **NTT Poly Mult (N=65536, 16 towers):** 44.57 ms/op
+- **Pointwise RNS (N=32768, 16 towers):** 10.50 ms/op (50.0 M coeff-mults/s)
+- **Pointwise RNS (N=65536, 16 towers):** 16.90 ms/op (62.1 M coeff-mults/s)
+- **NTT Poly Mult (N=32768, 16 towers):** 25.48 ms/op (20.6 M coeff-mults/s)
+- **NTT Poly Mult (N=65536, 16 towers):** 40.33 ms/op (26.0 M coeff-mults/s)
 
 ## Verification
 To verify the engine against the OpenFHE CPU reference:
