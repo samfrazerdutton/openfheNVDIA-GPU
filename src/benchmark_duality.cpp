@@ -4,6 +4,7 @@
 #include <vector>
 #include <chrono>
 #include <random>
+#include <atomic>
 
 using namespace std;
 using clk = chrono::high_resolution_clock;
@@ -165,8 +166,12 @@ int main() {
     // ── TEST 1: pointwise RNS multiply (no NTT) ───────────────────────────────
     cout<<"\n[TEST 1] Pointwise RNS multiply ("<<NUM_THREADS<<" OMP threads)\n";
     auto t0 = clk::now();
+    std::atomic<bool> omp_error{false};
+    std::string omp_error_msg;
     #pragma omp parallel for num_threads(NUM_THREADS) schedule(dynamic,1)
     for(int tid=0;tid<NUM_THREADS;tid++) {
+        if(omp_error) continue;
+        try {
         mt19937_64 lrng(tid*1000+1);
         vector<vector<uint64_t>> A(NUM_TOWERS,vector<uint64_t>(N));
         vector<vector<uint64_t>> B(NUM_TOWERS,vector<uint64_t>(N));
@@ -193,7 +198,12 @@ int main() {
             #pragma omp atomic write
             global_ok = false;
         }
+        } catch(const std::exception& e) {
+            #pragma omp critical
+            { omp_error = true; omp_error_msg = e.what(); }
+        }
     }
+    if(omp_error) throw std::runtime_error(std::string("[OMP] ") + omp_error_msg);
     cout<<"  elapsed="<<chrono::duration<double,milli>(clk::now()-t0).count()<<"ms\n";
 
     // ── TEST 2: negacyclic NTT polynomial multiply ────────────────────────────

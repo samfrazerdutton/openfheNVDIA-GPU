@@ -15,8 +15,8 @@
 extern "C" void LaunchRNSMultMontgomery(const uint64_t* a, const uint64_t* b, uint64_t* r,
                                          uint64_t q, uint64_t q_inv, uint64_t R2,
                                          uint32_t n, cudaStream_t s);
-extern "C" void LaunchNTT(uint64_t* x, const uint64_t* tw, uint64_t q, uint32_t n, cudaStream_t s);
-extern "C" void LaunchINTT(uint64_t* x, const uint64_t* tw_inv, uint64_t q, uint32_t n, uint64_t n_inv, cudaStream_t s);
+extern "C" void LaunchNTT(uint64_t* x, const uint64_t* tw, uint64_t q, uint64_t q_inv, uint32_t n, cudaStream_t s);
+extern "C" void LaunchINTT(uint64_t* x, const uint64_t* tw_inv, uint64_t q, uint64_t q_inv, uint32_t n, uint64_t n_inv, cudaStream_t s);
 
 static uint64_t calc_q_inv(uint64_t q) {
     uint64_t inv = q;
@@ -149,14 +149,15 @@ extern "C" void gpu_poly_mult_wrapper(
         CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
 
         const DeviceTwiddles& dt = GetDeviceTwiddles(q[i], ring);
-        LaunchNTT(da, dt.d_fwd, q[i], ring, s);
-        LaunchNTT(db, dt.d_fwd, q[i], ring, s);
+        uint64_t q_inv_i = calc_q_inv(q[i]);
+        LaunchNTT(da, dt.d_fwd, q[i], q_inv_i, ring, s);
+        LaunchNTT(db, dt.d_fwd, q[i], q_inv_i, ring, s);
         
         uint64_t q_inv = calc_q_inv(q[i]);
         uint64_t R2    = calc_R2(q[i]);
         LaunchRNSMultMontgomery(da, db, dr, q[i], q_inv, R2, ring, s);
         
-        LaunchINTT(dr, dt.d_inv, q[i], ring, dt.n_inv, s);
+        LaunchINTT(dr, dt.d_inv, q[i], q_inv_i, ring, dt.n_inv, s);
 
         reg.MarkDeviceDirty(hr[i]);
         reg.SyncToHostIfNeeded(hr[i], s); 

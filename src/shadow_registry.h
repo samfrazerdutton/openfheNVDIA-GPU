@@ -9,10 +9,15 @@ private:
     struct Entry {
         uint64_t* d_ptr;
         size_t bytes;
-        bool is_device_dirty; 
+        bool is_device_dirty;
     };
-    std::unordered_map<const void*, Entry> map_;
-    std::mutex mu_;
+    static constexpr int SHARDS = 16;
+    std::unordered_map<const void*, Entry> map_[SHARDS];
+    std::mutex mu_[SHARDS];
+
+    int shard(const void* p) const {
+        return (int)((uintptr_t)p >> 6 & (SHARDS - 1));
+    }
 
 public:
     static ShadowRegistry& Instance() {
@@ -20,9 +25,10 @@ public:
         return inst;
     }
 
-    // Retrieves an existing GPU pointer, or reallocates if capacity is insufficient
     uint64_t* GetDevicePtr(const void* h_ptr, size_t bytes) {
-        std::lock_guard<std::mutex> lock(mu_);
+        int s = shard(h_ptr);
+        std::lock_guard<std::mutex> lock(mu_[s]);
+        auto& map_ = this->map_[s];
         auto it = map_.find(h_ptr);
         
         if (it != map_.end()) {
@@ -49,27 +55,29 @@ public:
     }
 
     void MarkDeviceDirty(const void* h_ptr) {
-        std::lock_guard<std::mutex> lock(mu_);
-        auto it = map_.find(h_ptr);
-        if (it != map_.end()) {
+        int s = shard(h_ptr);
+        std::lock_guard<std::mutex> lock(mu_[s]);
+        auto it = map_[s].find(h_ptr);
+        if (it != map_[s].end()) {
             it->second.is_device_dirty = true;
         }
     }
 
     void SyncToHostIfNeeded(const void* h_ptr, cudaStream_t stream = 0) {
-        std::lock_guard<std::mutex> lock(mu_);
-        auto it = map_.find(h_ptr);
-        if (it != map_.end() && it->second.is_device_dirty) {
+        int s = shard(h_ptr);
+        std::lock_guard<std::mutex> lock(mu_[s]);
+        auto it = map_[s].find(h_ptr);
+        if (it != map_[s].end() && it->second.is_device_dirty) {
             cudaMemcpyAsync((void*)h_ptr, it->second.d_ptr, it->second.bytes, cudaMemcpyDeviceToHost, stream);
             it->second.is_device_dirty = false;
         }
     }
 
     void Purge() {
-        std::lock_guard<std::mutex> lock(mu_);
-        for (auto& pair : map_) {
-            cudaFree(pair.second.d_ptr);
+        for (int s = 0; s < SHARDS; s++) {
+            std::lock_guard<std::mutex> lock(mu_[s]);
+            for (auto& pair : map_[s]) cudaFree(pair.second.d_ptr);
+            map_[s].clear();
         }
-        map_.clear();
     }
 };

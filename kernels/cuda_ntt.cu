@@ -1,14 +1,14 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
-// SAFE 64-bit modular multiplication - NO __int128 modulo
+__device__ __forceinline__ uint64_t mont_mulmod(uint64_t a, uint64_t b, uint64_t m, uint64_t m_inv) {
+    __uint128_t T  = (__uint128_t)a * b;
+    uint64_t    mn = (uint64_t)T * m_inv;
+    uint64_t    t  = (uint64_t)((T + (__uint128_t)mn * m) >> 64);
+    return (t >= m) ? t - m : t;
+}
 __device__ __forceinline__ uint64_t mulmod64(uint64_t a, uint64_t b, uint64_t m) {
-    uint64_t res = 0; a %= m; b %= m;
-    while (b > 0) {
-        if (b & 1) { uint64_t sum = res + a; res = (sum >= m) ? sum - m : sum; }
-        uint64_t a2 = a + a; a = (a2 >= m) ? a2 - m : a2; b >>= 1;
-    }
-    return res;
+    return (uint64_t)((__uint128_t)a * b % m);
 }
 __device__ __forceinline__ uint64_t addmod(uint64_t a, uint64_t b, uint64_t m) {
     uint64_t sum = a + b; return (sum >= m) ? sum - m : sum;
@@ -29,7 +29,7 @@ __global__ void scale_by_ninv(uint64_t* __restrict__ x, uint64_t n_inv, uint64_t
 }
 __global__ void twist_kernel(uint64_t* __restrict__ x, const uint64_t* __restrict__ tw, uint64_t q, uint32_t N) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid < N) x[tid] = mulmod64(x[tid], tw[tid], q); 
+    if (tid < N) x[tid] = mulmod64(x[tid], tw[tid], q);
 }
 __global__ void ntt_stage_dit(uint64_t* __restrict__ x, const uint64_t* __restrict__ wpow, uint64_t q, uint32_t half_m, uint32_t N_half) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -51,18 +51,18 @@ __global__ void ntt_stage_dif(uint64_t* __restrict__ x, const uint64_t* __restri
 }
 static uint32_t ilog2(uint32_t N) { uint32_t k=0; while((1u<<k)<N) k++; return k; }
 
-extern "C" void LaunchNTT(uint64_t* x, const uint64_t* tw, uint64_t q, uint32_t N, cudaStream_t s) {
+extern "C" void LaunchNTT(uint64_t* x, const uint64_t* tw, uint64_t q, uint64_t q_inv, uint32_t N, cudaStream_t s) {
     int th = 256; uint32_t Nh = N/2, log2N = ilog2(N);
     int bf = (N + th - 1)/th, bh = (Nh + th - 1)/th;
-    twist_kernel<<<bf, th, 0, s>>>(x, tw, q, N);                   
+    twist_kernel<<<bf, th, 0, s>>>(x, tw, q, N);
     bit_reverse_permute<<<bf, th, 0, s>>>(x, N, log2N);
     for (uint32_t m = 1; m <= Nh; m <<= 1) ntt_stage_dit<<<bh, th, 0, s>>>(x, tw + N, q, m, Nh);
 }
-extern "C" void LaunchINTT(uint64_t* x, const uint64_t* tw_inv, uint64_t q, uint32_t N, uint64_t n_inv, cudaStream_t s) {
+extern "C" void LaunchINTT(uint64_t* x, const uint64_t* tw_inv, uint64_t q, uint64_t q_inv, uint32_t N, uint64_t n_inv, cudaStream_t s) {
     int th = 256; uint32_t Nh = N/2, log2N = ilog2(N);
     int bf = (N + th - 1)/th, bh = (Nh + th - 1)/th;
     for (uint32_t m = Nh; m >= 1; m >>= 1) ntt_stage_dif<<<bh, th, 0, s>>>(x, tw_inv + N, q, m, Nh);
     bit_reverse_permute<<<bf, th, 0, s>>>(x, N, log2N);
     scale_by_ninv<<<bf, th, 0, s>>>(x, n_inv, q, N);
-    twist_kernel<<<bf, th, 0, s>>>(x, tw_inv, q, N);             
+    twist_kernel<<<bf, th, 0, s>>>(x, tw_inv, q, N);
 }
