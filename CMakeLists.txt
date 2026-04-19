@@ -28,3 +28,11 @@ target_link_libraries(benchmark_duality PRIVATE openfhe_cuda_hal CUDA::cudart Op
 add_executable(benchmark src/benchmark.cpp)
 target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(benchmark PRIVATE openfhe_cuda_hal CUDA::cudart OpenMP::OpenMP_CXX)
+
+add_executable(bench_evalmult src/bench_evalmult.cpp)
+target_include_directories(bench_evalmult PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(bench_evalmult PRIVATE openfhe_cuda_hal CUDA::cudart)
+
+add_executable(gpu_engine src/gpu_engine.cpp)
+target_include_directories(gpu_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(gpu_engine PRIVATE openfhe_cuda_hal CUDA::cudart)
