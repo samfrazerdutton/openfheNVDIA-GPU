@@ -39,8 +39,8 @@ int main() {
     CCParams<CryptoContextCKKSRNS> params;
     params.SetMultiplicativeDepth(5);
     params.SetScalingModSize(50);
-    params.SetBatchSize(4096);
-    params.SetRingDim(8192);   // N=8192: GPU fast-path triggers at ring >= 4096
+    params.SetBatchSize(16384);
+    params.SetRingDim(32768);   // N=8192: GPU fast-path triggers at ring >= 4096
 
     // ── 1. Setup ──────────────────────────────────────────────────────────────
     auto t0 = clk::now();
@@ -54,7 +54,7 @@ int main() {
               << t_setup << " ms\n";
 
     // ── 2. Plaintext ──────────────────────────────────────────────────────────
-    size_t slots = 4096;
+    size_t slots = 16384;
     std::vector<double> x_vals(slots), y_vals(slots);
     for (size_t i = 0; i < slots; i++) {
         x_vals[i] = 0.1 * (i % 10 + 1);   // 0.1, 0.2, ... 1.0, 0.1, ...
