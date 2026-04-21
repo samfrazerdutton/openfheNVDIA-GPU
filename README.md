@@ -11,7 +11,7 @@ multiplication for the CKKS scheme. Tested on OpenFHE v1.4.x / v1.5.0.
 
 ## Requirements
 
-- CUDA 12+ and an NVIDIA GPU (sm_75 / sm_80 / sm_86 tested)
+- CUDA 12+ and an NVIDIA GPU 
 - OpenFHE v1.4.x or v1.5.0 installed at `/usr/local` or built from source
 - CMake 3.18+, GCC 13+, OpenMP
 
