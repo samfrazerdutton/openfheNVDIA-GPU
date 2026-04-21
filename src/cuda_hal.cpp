@@ -106,10 +106,15 @@ extern "C" void gpu_rns_mult_batch_wrapper(
         uint64_t* da = reg.GetDevicePtr(ha[i], bytes);
         uint64_t* db = reg.GetDevicePtr(hb[i], bytes);
         uint64_t* dr = reg.GetDevicePtr(hr[i], bytes);
-        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
-        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
+        
+        // Using cudaMemcpyDefault allows seamless Unified Memory transfer/prefetching
+        // without struct compatibility issues across CUDA versions.
+        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyDefault, s));
+        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyDefault, s));
+        
         LaunchRNSMultMontgomery(da, db, dr, q[i], calc_q_inv(q[i]), calc_R2(q[i]), ring, s);
-        CUDA_CHECK(cudaMemcpyAsync(hr[i], dr, bytes, cudaMemcpyDeviceToHost, s));
+        
+        CUDA_CHECK(cudaMemcpyAsync((void*)hr[i], dr, bytes, cudaMemcpyDefault, s));
     }
     openfhe_cuda::StreamPool::Instance().SyncAll();
 }
@@ -129,15 +134,18 @@ extern "C" void gpu_poly_mult_wrapper(
         uint64_t q_inv = calc_q_inv(q[i]);
         uint64_t* da = reg.GetDevicePtr(&scratch_a[i], bytes);
         uint64_t* db = reg.GetDevicePtr(&scratch_b[i], bytes);
-        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
-        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
+        
+        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyDefault, s));
+        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyDefault, s));
+        
         LaunchNTT(da, dt.d_fwd, q[i], q_inv, ring, s);
         LaunchNTT(db, dt.d_fwd, q[i], q_inv, ring, s);
         LaunchRNSMultMontgomery(da, db, da, q[i], q_inv, calc_R2(q[i]), ring, s);
         LaunchINTT(da, dt.d_inv, q[i], q_inv, ring, dt.n_inv, s);
+        
         uint64_t* dr = reg.GetDevicePtr(hr[i], bytes);
         CUDA_CHECK(cudaMemcpyAsync(dr, da, bytes, cudaMemcpyDeviceToDevice, s));
-        CUDA_CHECK(cudaMemcpyAsync(hr[i], dr, bytes, cudaMemcpyDeviceToHost, s));
+        CUDA_CHECK(cudaMemcpyAsync((void*)hr[i], dr, bytes, cudaMemcpyDefault, s));
     }
     openfhe_cuda::StreamPool::Instance().SyncAll();
 }
