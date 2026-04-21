@@ -1,21 +1,53 @@
-# OpenFHE NVIDIA GPU HAL (Stateful & Validated)
+# OpenFHE NVIDIA GPU HAL
 
-A high-performance, stateful CUDA abstraction layer for OpenFHE CKKS/BGV. This engine utilizes a Shadow Registry to maintain VRAM residency, bypassing PCIe bottlenecks for sequential homomorphic operations.
+A CUDA Hardware Abstraction Layer that accelerates OpenFHE's RNS polynomial
+multiplication for the CKKS scheme. Tested on OpenFHE v1.4.x / v1.5.0.
 
-## Architecture Highlights
-- **Stateful Residency:** Implements a `ShadowRegistry` to link CPU memory addresses with persistent GPU allocations, only syncing back to host when explicitly requested.
-- **Dynamic Reallocation:** Safely handles OS memory address recycling with capacity-aware VRAM management.
-- **Arithmetic:** Branchless, PTX-native 64-bit interleaved modular reduction.
-- **Negacyclic NTT:** Split-memory 2N twiddle layout with exact DIT/DIF sequence synchronization.
+## What it accelerates
 
-## Performance Benchmarks (RTX 2060 Max-Q)
-- **Pointwise RNS (N=32768):** 5.61 ms/op (93.5 M coeff-mults/s)
-- **Pointwise RNS (N=65536):** 7.56 ms/op (138.7 M coeff-mults/s)
-- **NTT Poly Mult (N=65536):** 30.65 ms/op (34.2 M coeff-mults/s)
+- `operator*=` on `DCRTPolyImpl` — every CKKS `EvalMult` (ring ≥ 4096, towers ≤ 32)
+- GPU negacyclic NTT polynomial multiply (16-tower, N=32768 in ~15ms)
+- Pointwise RNS multiply: 3007 M coeff-mults/sec on RTX-class hardware
 
-## Verification
+## Requirements
+
+- CUDA 12+ and an NVIDIA GPU (sm_75 / sm_80 / sm_86 tested)
+- OpenFHE v1.4.x or v1.5.0 installed at `/usr/local` or built from source
+- CMake 3.18+, GCC 13+, OpenMP
+
+## Build
+
 ```bash
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
+```
+
+## Verify
+
+```bash
+cd build
 LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH ./benchmark_duality
+LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH ./test_e2e_ckks
+```
+
+Expected: `[PASS] All tests passed` and `[PASS] CPU→GPU→CPU round-trip correct`
+
+## Patch OpenFHE
+
+```bash
+python3 patch_openfhe.py /path/to/openfhe-development
+cd /path/to/openfhe-development/build
+make -j$(nproc) OPENFHEcore
+```
+
+The patcher is safe to re-run. It backs up all modified files as `.bak`.
+The `patches/` directory contains the exact patched headers from the tested build.
+
+## Performance (RTX 2080, N=32768, 16 towers)
+
+| Operation | Latency |
+|---|---|
+| Pointwise RNS multiply | 0.174 ms |
+| GPU EvalMult (full e2e) | 38–53 ms |
+| NTT polynomial multiply | 15.2 ms |
