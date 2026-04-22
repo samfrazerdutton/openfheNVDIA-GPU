@@ -14,6 +14,8 @@ find_package(OpenMP      REQUIRED)
 # ── Core HAL shared library ───────────────────────────────────────────────────
 add_library(openfhe_cuda_hal SHARED
     src/cuda_hal.cpp
+    src/global_dag.cpp
+    src/fhe_compiler.cpp
     src/twiddle_gen.cpp
     kernels/cuda_math.cu
     kernels/cuda_ntt.cu
@@ -94,3 +96,9 @@ if(OpenFHE_FOUND)
         OpenMP::OpenMP_CXX
     )
 endif()
+
+# Phase 2 DAG Test
+add_executable(test_dag src/test_dag.cpp src/fhe_compiler.cpp src/cuda_hal.cpp src/twiddle_gen.cpp kernels/cuda_math.cu kernels/cuda_ntt.cu)
+target_include_directories(test_dag PRIVATE include)
+target_link_libraries(test_dag PRIVATE ${CUDAToolkit_LIBRARY_DIR}/libcudart.so)
+target_include_directories(test_dag PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES} /usr/local/cuda/include)

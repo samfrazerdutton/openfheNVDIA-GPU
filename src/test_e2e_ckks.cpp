@@ -1,3 +1,4 @@
+#include "global_dag.h"
 /**
  * test_e2e_ckks.cpp
  *
@@ -48,7 +49,11 @@ int main() {
     cc->Enable(PKE);
     cc->Enable(LEVELEDSHE);
     auto kp = cc->KeyGen();
+    GlobalDAG::Init();
+    GlobalDAG::is_capturing = true;
     cc->EvalMultKeyGen(kp.secretKey);
+    GlobalDAG::ExecuteAndSync();
+    GlobalDAG::is_capturing = false;
     double t_setup = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
     std::cout << "[1] Key generation:     " << std::fixed << std::setprecision(2)
               << t_setup << " ms\n";
@@ -77,7 +82,11 @@ int main() {
 
     // ── 4. EvalMult (GPU via HAL) ─────────────────────────────────────────────
     auto t2 = clk::now();
+    GlobalDAG::Init();
+    GlobalDAG::is_capturing = true;
     auto ct_result = cc->EvalMult(ctx, cty);
+    GlobalDAG::ExecuteAndSync();
+    GlobalDAG::is_capturing = false;
     double t_mult = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
     std::cout << "[3] EvalMult (GPU HAL): " << t_mult << " ms";
 
