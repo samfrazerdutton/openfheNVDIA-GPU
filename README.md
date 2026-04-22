@@ -1,53 +1,37 @@
-# OpenFHE NVIDIA GPU HAL
+# OpenFHE NVIDIA GPU HAL (Phase 2: DAG Edition)
 
-A CUDA Hardware Abstraction Layer that accelerates OpenFHE's RNS polynomial
-multiplication for the CKKS scheme. Tested on OpenFHE v1.4.x / v1.5.0.
+This repository provides a high-performance **Hardware Abstraction Layer (HAL)** for the OpenFHE library, specifically optimized for **NVIDIA RTX 20-series (Turing)** architecture and above. 
 
-## What it accelerates
+By implementing a **Just-In-Time (JIT) Directed Acyclic Graph (DAG) Compiler**, this project bypasses the traditional "PCIe Bottleneck" in Fully Homomorphic Encryption (FHE). Instead of eager execution, it captures FHE circuits into optimized CUDA Graphs and executes them in a single shot on the GPU.
 
-- `operator*=` on `DCRTPolyImpl` — every CKKS `EvalMult` (ring ≥ 4096, towers ≤ 32)
-- GPU negacyclic NTT polynomial multiply (16-tower, N=32768 in ~15ms)
-- Pointwise RNS multiply: 3007 M coeff-mults/sec on RTX-class hardware
+## 🚀 Performance Benchmarks
+*Tested on: NVIDIA RTX 2060 Laptop GPU / WSL2 (Ubuntu 22.04)* *Parameters: CKKS, Ring Dimension $N=32768$*
 
-## Requirements
+```text
+======================================================
+[*] OpenFHE NVIDIA GPU HAL — End-to-End CKKS Test
+[*] Pipeline: CPU encrypt → GPU EvalMult → CPU decrypt
+======================================================
 
-- CUDA 12+ and an NVIDIA GPU 
-- OpenFHE v1.4.x or v1.5.0 installed at `/usr/local` or built from source
-- CMake 3.18+, GCC 13+, OpenMP
+[1] Key generation:      535.61 ms
+[2] Encrypt (CPU):       88.94 ms
+[3] EvalMult (GPU HAL):  57.41 ms  [GPU Fast-path, ring=32768]
+[4] Decrypt (CPU):       25.27 ms
 
-## Build
+[*] Max absolute error across all 16384 slots: 0.00
+[*] Total pipeline latency (enc+mult+dec): 171.63 ms
 
-```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+======================================================
+[PASS] CPU→GPU→CPU round-trip correct
+======================================================
+🛠 Architecture: The "Lazy" DAG CompilerTraditional FHE GPU acceleration suffers from high latency due to constant CPU-GPU synchronization. This HAL solves that via:Instruction Capture: Intercepts OpenFHE operator*= calls and builds a Directed Acyclic Graph instead of executing math immediately.Phantom Memory Management: Maps OpenFHE host pointers to VRAM-resident "Phantom" buffers, ensuring intermediate data never leaves the GPU.CUDA Graph JIT: Compiles the execution tree into a native cudaGraph_t, launching complex circuits (like $y = (a \times b) + (c \times d)$) as a single kernel sequence.Negacyclic NTT Acceleration: Optimized Montgomery-reduction based NTT kernels specifically tuned for Turing-generation tensor/core-adjacent memory paths.📦 Componentsinclude/fhe_compiler.h: Core DAG tree logic and CUDA Graph recorder.include/global_dag.h: Singleton engine that manages the OpenFHE-to-GPU hook.include/phantom_registry.h: Tracking system for GPU-resident polynomials.src/cuda_hal.cpp: Hardware wrappers for RNS multiplication and NTT.patch_openfhe.py: Automated Python patcher to inject the HAL into OpenFHE's source.🚀 Getting Started1. Patch OpenFHEPoint the patcher to your OpenFHE-development directory to inject the v5 DAG hooks.
+./patch_openfhe.py ../openfhe-development
+2. Build the HAL
+mkdir -p build && cd build
+cmake ..
 make -j$(nproc)
-```
-
-## Verify
-
-```bash
-cd build
-LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH ./benchmark_duality
-LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH ./test_e2e_ckks
-```
-
-Expected: `[PASS] All tests passed` and `[PASS] CPU→GPU→CPU round-trip correct`
-
-## Patch OpenFHE
-
-```bash
-python3 patch_openfhe.py /path/to/openfhe-development
-cd /path/to/openfhe-development/build
-make -j$(nproc) OPENFHEcore
-```
-
-The patcher is safe to re-run. It backs up all modified files as `.bak`.
-The `patches/` directory contains the exact patched headers from the tested build.
-
-## Performance (RTX 2080, N=32768, 16 towers)
-
-| Operation | Latency |
-|---|---|
-| Pointwise RNS multiply | 0.174 ms |
-| GPU EvalMult (full e2e) | 38–53 ms |
-| NTT polynomial multiply | 15.2 ms |
+3. Run the E2E Test
+To ensure the dynamic linker uses the local optimized HAL, use LD_PRELOAD:
+LD_PRELOAD=./libopenfhe_cuda_hal.so ./test_e2e_ckks
+👤 Author
+Sam Cade Billinghurst a.k.a Sam Frazer Dutton
