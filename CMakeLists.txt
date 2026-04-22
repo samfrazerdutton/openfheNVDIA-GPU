@@ -74,3 +74,23 @@ if(OpenFHE_FOUND)
 else()
     message(STATUS "OpenFHE not found — skipping test_e2e_ckks (run patch_openfhe.py first)")
 endif()
+
+# ── Head-to-head CPU vs GPU benchmark ────────────────────────────────────────
+if(OpenFHE_FOUND)
+    add_executable(bench_vs_cpu src/bench_vs_cpu.cpp)
+    target_include_directories(bench_vs_cpu PRIVATE
+        /usr/local/include/openfhe
+        /usr/local/include/openfhe/pke
+        /usr/local/include/openfhe/core
+        /usr/local/include/openfhe/binfhe
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(bench_vs_cpu PRIVATE
+        openfhe_cuda_hal
+        OPENFHEpke
+        OPENFHEcore
+        OPENFHEbinfhe
+        CUDA::cudart
+        OpenMP::OpenMP_CXX
+    )
+endif()
