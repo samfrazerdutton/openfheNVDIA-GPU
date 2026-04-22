@@ -2,7 +2,7 @@
 
 This repository provides a high-performance **Hardware Abstraction Layer (HAL)** for the OpenFHE library, specifically optimized for **NVIDIA RTX 20-series (Turing)** architecture and above. 
 
-By implementing a **Just-In-Time (JIT) Directed Acyclic Graph (DAG) Compiler**, this project bypasses the traditional "PCIe Bottleneck" in Fully Homomorphic Encryption (FHE). Instead of eager execution, it captures FHE circuits into optimized CUDA Graphs and executes them in a single shot on the GPU.
+By implementing a **Just-In-Time (JIT) Directed Acyclic Graph (DAG) Compiler**, addressing the PCIe Bottleneck"in Fully Homomorphic Encryption (FHE). Instead of eager execution, it captures FHE circuits into optimized CUDA Graphs and executes them in a single shot on the GPU.
 
 ## 🚀 Performance Benchmarks
 *Tested on: NVIDIA RTX 2060 Laptop GPU / WSL2 (Ubuntu 22.04)* *Parameters: CKKS, Ring Dimension $N=32768$*
