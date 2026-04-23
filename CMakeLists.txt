@@ -102,3 +102,33 @@ add_executable(test_dag src/test_dag.cpp src/fhe_compiler.cpp src/cuda_hal.cpp s
 target_include_directories(test_dag PRIVATE include)
 target_link_libraries(test_dag PRIVATE ${CUDAToolkit_LIBRARY_DIR}/libcudart.so)
 target_include_directories(test_dag PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES} /usr/local/cuda/include)
+
+# ─── Phase 3+4 additions ────────────────────────────────────────────────────
+
+# Phase 3: Persistent VRAM cache
+target_sources(openfhe_cuda_hal PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/vram_cache.cpp
+    ${CMAKE_SOURCE_DIR}/src/gpu_keyswitch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gpu_evalmult_p34.cpp
+    ${CMAKE_SOURCE_DIR}/kernels/cuda_keyswitch.cu
+)
+target_include_directories(openfhe_cuda_hal PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+# Phase 3+4 end-to-end test
+add_executable(test_e2e_p34
+    src/test_e2e_p34.cpp
+)
+target_link_libraries(test_e2e_p34
+    openfhe_cuda_hal
+    OPENFHEcore OPENFHEpke OPENFHEbinfhe
+    ${CUDA_LIBRARIES}
+)
+target_include_directories(test_e2e_p34 PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    /usr/local/include/openfhe
+    /usr/local/include/openfhe/pke
+    /usr/local/include/openfhe/core
+    /usr/local/include/openfhe/binfhe
+)
