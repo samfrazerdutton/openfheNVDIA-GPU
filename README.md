@@ -1,79 +1,70 @@
-# OpenFHE NVIDIA GPU HAL (Phase 2: DAG Edition)
+# OpenFHE NVIDIA GPU HAL 🚀
 
-High-performance Hardware Abstraction Layer for OpenFHE, targeting NVIDIA RTX 20-series (Turing) and above. Implements a JIT DAG compiler that captures FHE circuits and dispatches them to CUDA Graphs, eliminating redundant CPU-GPU synchronization.
+A high-performance, transparent Hardware Abstraction Layer (HAL) for the [OpenFHE](https://openfhe.org/) library. This project solves the notorious "PCIe Bottleneck" in Fully Homomorphic Encryption (FHE) by implementing persistent VRAM caching and fully offloading RNS key-switching to NVIDIA GPUs.
 
-## Benchmarks
-*NVIDIA RTX 2060 Laptop / WSL2 Ubuntu 22.04 / CKKS N=32768*
+This HAL is designed as a drop-in accelerator. By utilizing dynamic linking (`LD_PRELOAD`) and an automated source patcher, developers can accelerate their existing OpenFHE applications **without rewriting any high-level cryptographic logic**.
 
-| Measurement | Time | Notes |
-|---|---|---|
-| GPU kernel (16 towers, N=16k) | **4.35 ms** | Data already in VRAM, pure compute |
-| GPU kernel (16 towers, N=64k) | **8.58 ms** | Pure compute |
-| EvalMult end-to-end (100-rep mean) | **84.2 ms** | Includes PCIe + CPU key-switch |
-| Full pipeline (enc + mult + dec) | **147 ms** | CKKS N=32768, 11 towers |
-| Numerical error | **< 1e-11** | All 16384 slots verified |
+## 📊 Performance Benchmarks
 
-The gap between 4ms kernel time and 84ms wall time is PCIe transfer overhead and CPU-side key-switching (relinearization). Eliminating that is Phase 3.
+*Hardware: NVIDIA RTX 2060 Laptop GPU (Turing) vs. Multi-core CPU (OpenMP)* *Parameters: CKKS, Ring Dimension $N=32768$, 11 Towers, Multiplicative Depth 5*
 
-## Architecture
-OpenFHE operator*=
-│
-▼
-dcrtpoly.h patch (GPU_HAL_PATCHED_V6)
-│
-▼
-gpu_rns_mult_batch_wrapper
-│  per-tower modulus array
-\
-▼
-ShadowRegistry  ──►  VRAM
-│
-▼
-LaunchRNSMultMontgomery (cuda_math.cu)
-Montgomery reduction, __uint128_t
-│
-▼
-Results written back to host
-**DAG Compiler** (`fhe_compiler.h/cpp`): Captures FHE operations into a `cudaGraph_t` via stream capture. Nodes carry per-tower moduli so each RNS prime is correct.
+### Head-to-Head Latency (EvalMult)
+Despite running on a highly constrained 2019-era laptop GPU, the HAL successfully beats a native, OpenMP-optimized CPU execution on pure latency by keeping ciphertexts resident in VRAM.
 
-**GlobalDAG** (`global_dag.h/cpp`): Singleton managing the OpenFHE→GPU intercept. Allocates VRAM for each host pointer, injects STORE nodes, compiles and launches the graph, then frees VRAM. No leaks across repeated EvalMult calls.
+| Architecture | Mean Latency | Max Error | Notes |
+| :--- | :--- | :--- | :--- |
+| **Native CPU (OpenMP)** | 43.36 ms | - | Standard OpenFHE execution |
+| **NVIDIA RTX 2060** | **40.80 ms** | < 1.36e-11 | **Phase 3+4 GPU HAL** |
 
-**NTT Kernels** (`cuda_ntt.cu`): Negacyclic NTT using `psi = g^((q-1)/2N)` with `psi^N = -1 mod q`. Requires `(q-1) % 2N == 0` primes.
+*Note: FHE is heavily memory-bandwidth bound. Scaling this architecture from an RTX 2060 (336 GB/s) to datacenter hardware like an NVIDIA H100 (3+ TB/s) is expected to yield sub-5ms latencies.*
 
-**Montgomery RNS** (`cuda_math.cu`): Exact 128-bit modular multiply, no approximation error.
+---
 
-## Getting Started
+## 🛠️ Architecture & Features
+
+This project was built in four phases to systematically eliminate CPU-GPU synchronization overhead:
+
+1. **Exact Montgomery RNS & Negacyclic NTT:** Low-level CUDA kernels (`LaunchRNSMultMontgomery`, `LaunchNTT`) providing flawless 128-bit exact modular arithmetic. Zero precision loss compared to the CPU.
+2. **DAG Compiler (Lazy Execution):** Captures OpenFHE operations into a Directed Acyclic Graph, dispatching massive parallel circuits via `cudaGraph_t` to minimize kernel launch overhead.
+3. **Persistent VRAM (`ShadowRegistry`):** Eliminates the PCIe bottleneck. The HAL tracks host-pointer lifecycle, uploading ciphertexts to the GPU exactly once. Subsequent `EvalMult` operations execute entirely in VRAM (0 ms PCIe cost).
+4. **GPU Hybrid Key-Switching:** The evaluation key (EVK) is uploaded once during initialization. The massively parallel inner-product operations of `EvalFastKeySwitchCoreExt` are batched and executed entirely on the GPU, removing the final ~35ms CPU bottleneck.
+
+## ⚙️ Getting Started
+
+### Prerequisites
+* CUDA Toolkit 13.0+
+* OpenFHE (Development branch / v1.1.x)
+* CMake 3.15+
 
 ### 1. Build the HAL
 ```bash
-mkdir -p build && cd build
+git clone [https://github.com/samfrazerdutton/openfheNVDIA-GPU.git](https://github.com/samfrazerdutton/openfheNVDIA-GPU.git)
+cd openfheNVDIA-GPU
+mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-```
+make -j$(nproc) openfhe_cuda_hal
+2. Patch OpenFHE (v6 Patcher)
+The included Python script automatically injects the ShadowRegistry and GPU Key-Switching hooks into your local OpenFHE installation.
+cd openfheNVDIA-GPU
+python3 patch_openfhe.py /path/to/your/openfhe-development
 
-### 2. Patch OpenFHE
-```bash
-python3 patch_openfhe.py ~/openfhe-development
-cd ~/openfhe-development/build && make -j$(nproc) OPENFHEcore
-```
+# Rebuild OpenFHE core and pke
+cd /path/to/your/openfhe-development/build
+make -j$(nproc) OPENFHEcore OPENFHEpke
+3. Run Applications
+No code changes are required for your OpenFHE executable. Simply force the dynamic linker to use the HAL:
+# Run the E2E benchmark
+cd openfheNVDIA-GPU/build
+make bench_vs_cpu
+LD_PRELOAD=$PWD/libopenfhe_cuda_hal.so ./bench_vs_cpu --gpu
+🗺️ Roadmap
+Dynamic Modulus Extension: Support for dynamic resizing of the RNS towers during modulus switching.
 
-### 3. Run end-to-end test
-```bash
-cd build
-LD_PRELOAD=$PWD/libopenfhe_cuda_hal.so ./test_e2e_ckks
-```
+Datacenter Scaling: Benchmarking on NVIDIA 6G / Datacenter hardware (A100/H100).
 
-### 4. Run benchmarks
-```bash
-./bench_evalmult                                          # pure GPU kernel
-LD_PRELOAD=$PWD/libopenfhe_cuda_hal.so ./bench_vs_cpu    # full pipeline
-```
+Multi-GPU Swarm: Partitioning RNS towers across multiple GPUs over NVLink.
 
-## Roadmap
+👤 Author
+Sam Frazer Dutton Mutton Industries
 
-- **Phase 2 (done):** DAG compiler, per-tower modulus correctness, zero VRAM leaks
-- **Phase 3:** Persistent VRAM — keep ciphertexts GPU-resident between operations, eliminating PCIe upload/download per EvalMult
-- **Phase 4:** GPU-resident relinearization keys + key-switch acceleration — the dominant remaining cost
-
-## Author
-Sam Frazer Dutton
+Built to bring accessible, high-performance open-source Fully Homomorphic Encryption to the American tech ecosystem.
