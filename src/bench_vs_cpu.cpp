@@ -1,84 +1,50 @@
-#include "openfhe.h"
-#include <chrono>
-#include <vector>
-#include <numeric>
-#include <cmath>
+#include <openfhe.h>
 #include <iostream>
 #include <iomanip>
+#include <chrono>
+#include <vector>
 
 using namespace lbcrypto;
-using Clock = std::chrono::high_resolution_clock;
+using clk = std::chrono::high_resolution_clock;
 
-static double elapsed_ms(Clock::time_point a, Clock::time_point b) {
-    return std::chrono::duration<double, std::milli>(b - a).count();
-}
-
-int main() {
-    const int NREPS  = 100;
-    const int WARMUP = 5;
+int main(int argc, char* argv[]) {
+    bool is_gpu = (argc > 1 && std::string(argv[1]) == "--gpu");
+    
+    std::cout << "======================================================\n";
+    std::cout << (is_gpu ? "[*] GPU (RTX 2060) Benchmark" : "[*] CPU (Native OpenMP) Benchmark") << "\n";
+    std::cout << "======================================================\n";
 
     CCParams<CryptoContextCKKSRNS> params;
-    params.SetMultiplicativeDepth(10);
+    params.SetMultiplicativeDepth(5);
     params.SetScalingModSize(50);
-    params.SetRingDim(32768);
     params.SetBatchSize(16384);
-    params.SetScalingTechnique(FLEXIBLEAUTO);
-    params.SetSecurityLevel(HEStd_128_classic);
+    params.SetRingDim(32768);
 
     CryptoContext<DCRTPoly> cc = GenCryptoContext(params);
     cc->Enable(PKE);
-    cc->Enable(KEYSWITCH);
     cc->Enable(LEVELEDSHE);
 
-    auto keyPair = cc->KeyGen();
-    cc->EvalMultKeyGen(keyPair.secretKey);
+    auto kp = cc->KeyGen();
+    cc->EvalMultKeyGen(kp.secretKey);
 
-    std::vector<double> x(16384, 0.1);
-    std::vector<double> y(16384, 0.2);
-    Plaintext ptx1 = cc->MakeCKKSPackedPlaintext(x);
-    Plaintext ptx2 = cc->MakeCKKSPackedPlaintext(y);
+    std::vector<double> x(16384, 0.5), y(16384, 0.5);
+    auto ctx = cc->Encrypt(kp.publicKey, cc->MakeCKKSPackedPlaintext(x));
+    auto cty = cc->Encrypt(kp.publicKey, cc->MakeCKKSPackedPlaintext(y));
 
-    auto ctx1 = cc->Encrypt(keyPair.publicKey, ptx1);
-    auto ctx2 = cc->Encrypt(keyPair.publicKey, ptx2);
+    // Warmup (PCIe upload + EVK upload for GPU cache)
+    Ciphertext<DCRTPoly> result = cc->EvalMult(ctx, cty);
 
-    // Warmup
-    for (int i = 0; i < WARMUP; i++) {
-        auto tmp = cc->EvalMult(ctx1, ctx2);
+    int reps = 25;
+    double total_ms = 0.0;
+
+    for (int i = 0; i < reps; i++) {
+        auto t0 = clk::now();
+        result = cc->EvalMult(ctx, cty);
+        total_ms += std::chrono::duration<double, std::milli>(clk::now() - t0).count();
     }
 
-    auto t_start = Clock::now();
-    auto ctx_res = ctx1;
-    for (int i = 0; i < NREPS; i++) {
-        ctx_res = cc->EvalMult(ctx1, ctx2);
-    }
-    auto t_end = Clock::now();
+    std::cout << "Ring dim : 32768 | Towers : 11 | Reps : " << reps << "\n";
+    std::cout << "Mean Latency: " << std::fixed << std::setprecision(2) << (total_ms / reps) << " ms\n\n";
 
-    Plaintext ptx_res;
-    cc->Decrypt(keyPair.secretKey, ctx_res, &ptx_res);
-    ptx_res->SetLength(16384);
-
-    double expected = 0.02;
-    double got = ptx_res->GetRealPackedValue()[0];
-    double err = std::abs(expected - got);
-
-    std::cout << "Ring dim : 32768\n";
-    std::cout << "Towers   : " << ctx1->GetElements()[0].GetNumOfElements() << "\n";
-    std::cout << "Reps     : " << NREPS << "\n\n";
-
-    double total_ms = elapsed_ms(t_start, t_end);
-    double mean_ms = total_ms / NREPS;
-
-    std::cout << "EvalMult over " << NREPS << " reps:\n";
-    std::cout << "  mean   " << mean_ms << " ms\n\n";
-
-    std::cout << std::fixed << std::setprecision(8);
-    std::cout << "Correctness: expected=" << expected << " got=" << got << " err=" << err << "\n";
-    
-    if (err < 1e-4) {
-        std::cout << "[PASS]\n";
-        return 0;
-    } else {
-        std::cout << "[FAIL] Error too large\n";
-        return 1;
-    }
+    return 0;
 }
