@@ -65,6 +65,7 @@ Datacenter Scaling: Benchmarking on NVIDIA 6G / Datacenter hardware (A100/H100).
 Multi-GPU Swarm: Partitioning RNS towers across multiple GPUs over NVLink.
 
 - Author
-Sam Frazer Dutton Mutton Industries
+Sam Frazer Dutton
+
 
 Built to bring accessible, high-performance open-source Fully Homomorphic Encryption to the American tech ecosystem.
