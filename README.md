@@ -1,10 +1,10 @@
-# OpenFHE NVIDIA GPU HAL 🚀
+# OpenFHE NVIDIA GPU HAL 
 
 A high-performance, transparent Hardware Abstraction Layer (HAL) for the [OpenFHE](https://openfhe.org/) library. This project solves the notorious "PCIe Bottleneck" in Fully Homomorphic Encryption (FHE) by implementing persistent VRAM caching and fully offloading RNS key-switching to NVIDIA GPUs.
 
 This HAL is designed as a drop-in accelerator. By utilizing dynamic linking (`LD_PRELOAD`) and an automated source patcher, developers can accelerate their existing OpenFHE applications **without rewriting any high-level cryptographic logic**.
 
-## 📊 Performance Benchmarks
+##  Performance Benchmarks
 
 *Hardware: NVIDIA RTX 2060 Laptop GPU (Turing) vs. Multi-core CPU (OpenMP)* *Parameters: CKKS, Ring Dimension $N=32768$, 11 Towers, Multiplicative Depth 5*
 
@@ -20,7 +20,7 @@ Despite running on a highly constrained 2019-era laptop GPU, the HAL successfull
 
 ---
 
-## 🛠️ Architecture & Features
+##  Architecture & Features
 
 This project was built in four phases to systematically eliminate CPU-GPU synchronization overhead:
 
@@ -29,7 +29,7 @@ This project was built in four phases to systematically eliminate CPU-GPU synchr
 3. **Persistent VRAM (`ShadowRegistry`):** Eliminates the PCIe bottleneck. The HAL tracks host-pointer lifecycle, uploading ciphertexts to the GPU exactly once. Subsequent `EvalMult` operations execute entirely in VRAM (0 ms PCIe cost).
 4. **GPU Hybrid Key-Switching:** The evaluation key (EVK) is uploaded once during initialization. The massively parallel inner-product operations of `EvalFastKeySwitchCoreExt` are batched and executed entirely on the GPU, removing the final ~35ms CPU bottleneck.
 
-## ⚙️ Getting Started
+##  Getting Started
 
 ### Prerequisites
 * CUDA Toolkit 13.0+
@@ -57,14 +57,14 @@ No code changes are required for your OpenFHE executable. Simply force the dynam
 cd openfheNVDIA-GPU/build
 make bench_vs_cpu
 LD_PRELOAD=$PWD/libopenfhe_cuda_hal.so ./bench_vs_cpu --gpu
-🗺️ Roadmap
+ -Roadmap
 Dynamic Modulus Extension: Support for dynamic resizing of the RNS towers during modulus switching.
 
 Datacenter Scaling: Benchmarking on NVIDIA 6G / Datacenter hardware (A100/H100).
 
 Multi-GPU Swarm: Partitioning RNS towers across multiple GPUs over NVLink.
 
-👤 Author
+- Author
 Sam Frazer Dutton Mutton Industries
 
 Built to bring accessible, high-performance open-source Fully Homomorphic Encryption to the American tech ecosystem.
