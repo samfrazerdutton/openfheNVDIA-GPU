@@ -3,6 +3,9 @@
 #include <vector>
 #include <cstdint>
 #include <mutex>
+#include <stdexcept>
+#include <string>
+#include <cstdio>
 
 namespace openfhe_cuda {
 
@@ -12,21 +15,43 @@ public:
         static StreamPool inst;
         return inst;
     }
+
     void Init(uint32_t n) {
         std::lock_guard<std::mutex> lk(mu_);
-        if (!streams_.empty()) return;
+        if (streams_.size() >= n) return;
+        uint32_t old = (uint32_t)streams_.size();
         streams_.resize(n);
-        for (auto& s : streams_) cudaStreamCreate(&s);
+        for (uint32_t i = old; i < n; i++) {
+            cudaError_t e = cudaStreamCreate(&streams_[i]);
+            if (e != cudaSuccess)
+                throw std::runtime_error(
+                    std::string("[StreamPool] cudaStreamCreate: ") +
+                    cudaGetErrorString(e));
+        }
     }
-    cudaStream_t Get(uint32_t tower_idx) {
-        return streams_[tower_idx % streams_.size()];
+
+    cudaStream_t Get(uint32_t idx) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (streams_.empty())
+            throw std::runtime_error("[StreamPool] not initialized");
+        return streams_[idx % streams_.size()];
     }
+
     void SyncAll() {
-        for (auto s : streams_) cudaStreamSynchronize(s);
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto s : streams_) {
+            cudaError_t e = cudaStreamSynchronize(s);
+            if (e != cudaSuccess)
+                fprintf(stderr, "[StreamPool] sync: %s\n",
+                        cudaGetErrorString(e));
+        }
     }
+
     ~StreamPool() {
+        std::lock_guard<std::mutex> lk(mu_);
         for (auto s : streams_) cudaStreamDestroy(s);
     }
+
 private:
     StreamPool() = default;
     std::vector<cudaStream_t> streams_;
@@ -34,4 +59,3 @@ private:
 };
 
 } // namespace openfhe_cuda
-

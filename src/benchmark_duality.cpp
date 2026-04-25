@@ -1,6 +1,7 @@
 #include "cuda_hal.h"
 #include <omp.h>
 #include <iostream>
+extern "C" void gpu_clear_vram_cache();
 #include <vector>
 #include <chrono>
 #include <random>

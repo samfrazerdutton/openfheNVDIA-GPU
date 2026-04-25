@@ -5,11 +5,18 @@
 #include <stdexcept>
 #include <string>
 #include <cstring>
-
-// ShadowRegistry — unified memory residency tracker.
-// Uses cudaMallocManaged so host and device share the same pointer.
+#include <array>
 
 class ShadowRegistry {
+    static constexpr int SHARDS = 16;
+    struct Entry { uint64_t* d_ptr; size_t bytes; };
+    struct Shard {
+        std::mutex mu;
+        std::unordered_map<const void*, Entry> map;
+    };
+    std::array<Shard, SHARDS> shards_;
+    int idx(const void* p) const { return (int)((uintptr_t)p >> 6 & (SHARDS-1)); }
+
 public:
     static ShadowRegistry& Instance() {
         static ShadowRegistry inst;
@@ -17,40 +24,43 @@ public:
     }
 
     uint64_t* GetDevicePtr(const void* h_ptr, size_t bytes) {
-        std::lock_guard<std::mutex> lock(mu_);
-        auto it = map_.find(h_ptr);
-        if (it != map_.end()) {
-            return it->second;
+        if (!h_ptr) throw std::runtime_error("ShadowRegistry: null host ptr");
+        auto& sh = shards_[idx(h_ptr)];
+        std::lock_guard<std::mutex> lk(sh.mu);
+        auto it = sh.map.find(h_ptr);
+        
+        if (it != sh.map.end()) {
+            if (it->second.bytes >= bytes) {
+                return it->second.d_ptr; // Existing VRAM buffer is large enough
+            } else {
+                cudaFree(it->second.d_ptr); // Too small, evict it
+                sh.map.erase(it);
+            }
         }
         
-        uint64_t* d_ptr = nullptr;
-        cudaError_t err = cudaMallocManaged(&d_ptr, bytes);
-        if (err != cudaSuccess) {
-            throw std::runtime_error("ShadowRegistry: cudaMallocManaged failed");
-        }
+        uint64_t* d = nullptr;
+        cudaError_t e = cudaMallocManaged(&d, bytes);
+        if (e != cudaSuccess)
+            throw std::runtime_error("ShadowRegistry cudaMallocManaged failed");
         
-        if (h_ptr) {
-            std::memcpy(d_ptr, h_ptr, bytes);
-        }
-        
-        map_[h_ptr] = d_ptr;
-        return d_ptr;
+        sh.map[h_ptr] = {d, bytes};
+        return d;
     }
 
-    void FreeAll() {
-        std::lock_guard<std::mutex> lock(mu_);
-        for (auto& pair : map_) {
-            cudaFree(pair.second);
+    void Clear() {
+        for(int i=0; i<SHARDS; i++) {
+            std::lock_guard<std::mutex> lk(shards_[i].mu);
+            for(auto& kv : shards_[i].map) cudaFree(kv.second.d_ptr);
+            shards_[i].map.clear();
         }
-        map_.clear();
     }
-
-private:
-    ShadowRegistry() = default;
-    ~ShadowRegistry() { FreeAll(); }
-    ShadowRegistry(const ShadowRegistry&) = delete;
-    ShadowRegistry& operator=(const ShadowRegistry&) = delete;
-
-    std::unordered_map<const void*, uint64_t*> map_;
-    std::mutex mu_;
+    
+    size_t CacheSize() {
+        size_t total = 0;
+        for(int i=0; i<SHARDS; i++) {
+            std::lock_guard<std::mutex> lk(shards_[i].mu);
+            total += shards_[i].map.size();
+        }
+        return total;
+    }
 };

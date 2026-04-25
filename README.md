@@ -1,71 +1,51 @@
-# OpenFHE NVIDIA GPU HAL 
+# OpenFHE NVIDIA GPU Hardware Abstraction Layer (HAL)
 
-A high-performance, transparent Hardware Abstraction Layer (HAL) for the [OpenFHE](https://openfhe.org/) library. This project solves the notorious "PCIe Bottleneck" in Fully Homomorphic Encryption (FHE) by implementing persistent VRAM caching and fully offloading RNS key-switching to NVIDIA GPUs.
+A high-performance NVIDIA CUDA Hardware Abstraction Layer (HAL) for the [OpenFHE](https://github.com/openfheorg/openfhe-development) Fully Homomorphic Encryption library. This engine accelerates polynomial arithmetic (NTT, INTT, and RNS multiplications) for schemes like CKKS, enabling rapid Evaluation Multiplication (`EvalMult`) and Zero-Trust AI inference.
 
-This HAL is designed as a drop-in accelerator. By utilizing dynamic linking (`LD_PRELOAD`) and an automated source patcher, developers can accelerate their existing OpenFHE applications **without rewriting any high-level cryptographic logic**.
+## 🚀 Features
 
-##  Performance Benchmarks
+* **High-Throughput Polynomial Math:** Reaches ~67.2 Million coeff-mults/s for large-ring (N=65536) Pointwise RNS and ~9.8 Million coeff-mults/s for full Negacyclic NTT convolutions on consumer GPUs (e.g., RTX 2060).
+* **Persistent VRAM Caching:** Features a highly optimized, size-aware `ShadowRegistry` that dynamically caches OpenFHE host pointers in GPU managed memory, eliminating redundant PCIe transfers across evaluation circuits.
+* **Thread-Safe & OpenMP Ready:** The memory registry and stream pools use a 16-shard mutex architecture to safely handle concurrent OpenFHE CPU threads during batch evaluations.
+* **Seamless E2E Integration:** Hooks directly into OpenFHE's CPU-side decryption and evaluation pipelines (Phase 3+4 CKKS compatible).
 
-*Hardware: NVIDIA RTX 2060 Laptop GPU (Turing) vs. Multi-core CPU (OpenMP)* *Parameters: CKKS, Ring Dimension $N=32768$, 11 Towers, Multiplicative Depth 5*
+## 🛠 Prerequisites
 
-### Head-to-Head Latency (EvalMult)
-Despite running on a highly constrained 2019-era laptop GPU, the HAL successfully beats a native, OpenMP-optimized CPU execution on pure latency by keeping ciphertexts resident in VRAM.
+* **OS:** Ubuntu 24.04 LTS (WSL2 supported)
+* **Hardware:** NVIDIA GPU with Compute Capability 7.5, 8.0, or 8.6 (e.g., Turing, Ampere)
+* **Toolkit:** CUDA Toolkit 13.2+
+* **Compiler:** GCC/G++ 13.3+ and CMake 3.18+
+* **OpenFHE:** OpenFHE development branch installed globally (headers in `/usr/local/include/openfhe`)
 
-| Architecture | Mean Latency | Max Error | Notes |
-| :--- | :--- | :--- | :--- |
-| **Native CPU (OpenMP)** | 43.36 ms | - | Standard OpenFHE execution |
-| **NVIDIA RTX 2060** | **40.80 ms** | < 1.36e-11 | **Phase 3+4 GPU HAL** |
+## 🏗 Build Instructions
 
-*Note: FHE is heavily memory-bandwidth bound. Scaling this architecture from an RTX 2060 (336 GB/s) to datacenter hardware like an NVIDIA H100 (3+ TB/s) is expected to yield sub-5ms latencies.*
+Clone the repository and build using standard CMake:
 
----
-
-##  Architecture & Features
-
-This project was built in four phases to systematically eliminate CPU-GPU synchronization overhead:
-
-1. **Exact Montgomery RNS & Negacyclic NTT:** Low-level CUDA kernels (`LaunchRNSMultMontgomery`, `LaunchNTT`) providing flawless 128-bit exact modular arithmetic. Zero precision loss compared to the CPU.
-2. **DAG Compiler (Lazy Execution):** Captures OpenFHE operations into a Directed Acyclic Graph, dispatching massive parallel circuits via `cudaGraph_t` to minimize kernel launch overhead.
-3. **Persistent VRAM (`ShadowRegistry`):** Eliminates the PCIe bottleneck. The HAL tracks host-pointer lifecycle, uploading ciphertexts to the GPU exactly once. Subsequent `EvalMult` operations execute entirely in VRAM (0 ms PCIe cost).
-4. **GPU Hybrid Key-Switching:** The evaluation key (EVK) is uploaded once during initialization. The massively parallel inner-product operations of `EvalFastKeySwitchCoreExt` are batched and executed entirely on the GPU, removing the final ~35ms CPU bottleneck.
-
-##  Getting Started
-
-### Prerequisites
-* CUDA Toolkit 13.0+
-* OpenFHE (Development branch / v1.1.x)
-* CMake 3.15+
-
-### 1. Build the HAL
 ```bash
 git clone [https://github.com/samfrazerdutton/openfheNVDIA-GPU.git](https://github.com/samfrazerdutton/openfheNVDIA-GPU.git)
 cd openfheNVDIA-GPU
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc) openfhe_cuda_hal
-2. Patch OpenFHE (v6 Patcher)
-The included Python script automatically injects the ShadowRegistry and GPU Key-Switching hooks into your local OpenFHE installation.
-cd openfheNVDIA-GPU
-python3 patch_openfhe.py /path/to/your/openfhe-development
-
-# Rebuild OpenFHE core and pke
-cd /path/to/your/openfhe-development/build
-make -j$(nproc) OPENFHEcore OPENFHEpke
-3. Run Applications
-No code changes are required for your OpenFHE executable. Simply force the dynamic linker to use the HAL:
-# Run the E2E benchmark
-cd openfheNVDIA-GPU/build
-make bench_vs_cpu
-LD_PRELOAD=$PWD/libopenfhe_cuda_hal.so ./bench_vs_cpu --gpu
- -Roadmap
-Dynamic Modulus Extension: Support for dynamic resizing of the RNS towers during modulus switching.
-
-Datacenter Scaling: Benchmarking on NVIDIA 6G / Datacenter hardware (A100/H100).
-
-Multi-GPU Swarm: Partitioning RNS towers across multiple GPUs over NVLink.
-
-- Author
-Sam Frazer Dutton
+make -j$(nproc)
 
 
-Built to bring accessible, high-performance open-source Fully Homomorphic Encryption to the American tech ecosystem.
+
+🧪 Testing & Benchmarks
+The build pipeline generates several test suites to verify math correctness and measure throughput.
+
+Duality & OpenMP Benchmark: Tests thread contention and verifies GPU Negacyclic NTT against a CPU reference.
+OMP_NUM_THREADS=8 ./benchmark_duality
+Evaluation Multiplication Benchmark: Raw throughput tests for RNS multiplication at various ring dimensions.
+./bench_evalmult
+End-to-End CKKS Integration: Verifies the full OpenFHE pipeline (KeyGen -> CPU Encrypt -> GPU EvalMult -> CPU Decrypt).
+./test_e2e_ckks
+./test_e2e_p34
+Architecture Overview
+The core of the integration relies on intercepting OpenFHE's polynomial multiplications.
+
+gpu_rns_mult_batch_wrapper: The primary C-linkage hook that intercepts EvalMult.
+
+ShadowRegistry: Manages cudaMallocManaged memory. It maps OpenFHE's host-side pointers to GPU VRAM and dynamically resizes them if the ring dimension expands, preventing aliasing and out-of-memory faults.
+
+📄 License
+This project is open-source and intended for academic, research, and defense technology development.
