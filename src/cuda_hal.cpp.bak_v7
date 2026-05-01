@@ -170,11 +170,3 @@ extern "C" void gpu_synchronize_all() {
 }
 
 extern "C" void gpu_clear_vram_cache() { ShadowRegistry::Instance().Clear(); }
-
-extern "C" void gpu_prepare_for_decrypt() {
-    openfhe_cuda::StreamPool::Instance().SyncAll();
-}
-
-thread_local bool gpu_evalmult_enabled = true;
-extern "C" void gpu_disable_for_decrypt() { gpu_evalmult_enabled = false; }
-extern "C" void gpu_enable_evalmult()     { gpu_evalmult_enabled = true;  }

@@ -90,32 +90,35 @@ extern "C" void gpu_rns_mult_batch_wrapper(
     const uint64_t* q, uint32_t ring, uint32_t num_towers)
 {
     openfhe_cuda::StreamPool::Instance().Init(32);
-    size_t bytes = (size_t)ring * sizeof(uint64_t);
+    const size_t bytes = (size_t)ring * sizeof(uint64_t);
     auto& reg = ShadowRegistry::Instance();
 
     std::vector<uint64_t*> d_out(num_towers, nullptr);
     for (uint32_t i = 0; i < num_towers; i++)
         CUDA_CHECK(cudaMalloc(&d_out[i], bytes));
 
+    std::vector<cudaEvent_t> events(num_towers);
+    for (uint32_t i = 0; i < num_towers; i++)
+        CUDA_CHECK(cudaEventCreateWithFlags(&events[i], cudaEventDisableTiming));
+
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
         uint64_t* da = reg.GetDevicePtr(ha[i], bytes);
         uint64_t* db = reg.GetDevicePtr(hb[i], bytes);
-        // cudaMemcpyDefault: required for cudaMallocManaged buffers.
-        // cudaMemcpyHostToDevice is illegal when dst is a managed pointer.
-        if (!da || !db ) {
-            throw std::runtime_error("[CUDA HAL] Null pointer from cudaMallocManaged. VRAM exhausted.");
-        }
-        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyDefault, s));
-        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyDefault, s));
+        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
         LaunchRNSMultMontgomery(da, db, d_out[i],
             q[i], calc_q_inv(q[i]), calc_R2(q[i]), ring, s);
+        CUDA_CHECK(cudaEventRecord(events[i], s));
     }
-    openfhe_cuda::StreamPool::Instance().SyncAll();
 
     for (uint32_t i = 0; i < num_towers; i++) {
-        CUDA_CHECK(cudaMemcpy(hr[i], d_out[i], bytes, cudaMemcpyDeviceToHost));
+        cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
+        CUDA_CHECK(cudaEventSynchronize(events[i]));
+        CUDA_CHECK(cudaMemcpyAsync(hr[i], d_out[i], bytes, cudaMemcpyDeviceToHost, s));
+        cudaStreamSynchronize(s);
         cudaFree(d_out[i]);
+        cudaEventDestroy(events[i]);
     }
 }
 
@@ -124,7 +127,7 @@ extern "C" void gpu_poly_mult_wrapper(
     const uint64_t* q, uint32_t ring, uint32_t num_towers)
 {
     openfhe_cuda::StreamPool::Instance().Init(32);
-    size_t bytes = (size_t)ring * sizeof(uint64_t);
+    const size_t bytes = (size_t)ring * sizeof(uint64_t);
     auto& reg = ShadowRegistry::Instance();
     static uint64_t scratch_a[64];
     static uint64_t scratch_b[64];
@@ -139,11 +142,8 @@ extern "C" void gpu_poly_mult_wrapper(
         uint64_t q_inv = calc_q_inv(q[i]);
         uint64_t* da = reg.GetDevicePtr(&scratch_a[i], bytes);
         uint64_t* db = reg.GetDevicePtr(&scratch_b[i], bytes);
-        if (!da || !db ) {
-            throw std::runtime_error("[CUDA HAL] Null pointer from cudaMallocManaged. VRAM exhausted.");
-        }
-        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyDefault, s));
-        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyDefault, s));
+        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
         LaunchNTT(da, dt.d_fwd, q[i], q_inv, ring, s);
         LaunchNTT(db, dt.d_fwd, q[i], q_inv, ring, s);
         LaunchRNSMultMontgomery(da, db, d_out[i], q[i], q_inv, calc_R2(q[i]), ring, s);
@@ -169,12 +169,10 @@ extern "C" void gpu_synchronize_all() {
     openfhe_cuda::StreamPool::Instance().SyncAll();
 }
 
-extern "C" void gpu_clear_vram_cache() { ShadowRegistry::Instance().Clear(); }
-
-extern "C" void gpu_prepare_for_decrypt() {
+extern "C" void gpu_sync_all_to_host() {
     openfhe_cuda::StreamPool::Instance().SyncAll();
 }
 
-thread_local bool gpu_evalmult_enabled = true;
-extern "C" void gpu_disable_for_decrypt() { gpu_evalmult_enabled = false; }
-extern "C" void gpu_enable_evalmult()     { gpu_evalmult_enabled = true;  }
+extern "C" void gpu_clear_vram_cache() {
+    ShadowRegistry::Instance().Clear();
+}

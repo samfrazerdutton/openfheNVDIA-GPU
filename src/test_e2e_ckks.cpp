@@ -1,4 +1,6 @@
 #include <openfhe.h>
+
+extern "C" void gpu_disable_for_decrypt();
 #include <chrono>
 #include <cmath>
 #include <iomanip>
@@ -43,6 +45,7 @@ int main() {
     std::cout << "[3] EvalMult: " << std::chrono::duration<double,std::milli>(clk::now()-t2).count() << " ms\n";
     auto t3=clk::now();
     Plaintext pt_out;
+    gpu_disable_for_decrypt();
     cc->Decrypt(kp.secretKey,ct_result,&pt_out);
     pt_out->SetLength(slots);
     std::cout << "[4] Decrypt: " << std::chrono::duration<double,std::milli>(clk::now()-t3).count() << " ms\n";
