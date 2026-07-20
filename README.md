@@ -1,147 +1,105 @@
-# OpenFHE NVIDIA GPU HAL
+# openfheNVDIA-GPU
 
-A CUDA hardware-abstraction layer that accelerates [OpenFHE](https://github.com/openfheorg/openfhe-development)'s
-lattice-crypto primitives (NTT, RNS pointwise ops, key-switching) on NVIDIA GPUs, plus **Dumbo Protocol** —
-a three-node encrypted edge-failover demo built on top of the HAL.
+**CUDA acceleration HAL for [OpenFHE](https://github.com/openfheorg/openfhe-development)** — routes RNS polynomial arithmetic (Montgomery multiply, negacyclic NTT, keyswitch kernels) through custom CUDA kernels, with a patcher that hooks them into OpenFHE's CKKS pipeline.
 
-Verified working end-to-end on an RTX 2060 (sm_75) under WSL2 — CUDA 13.2, CMake 3.28, GCC 13.3.
+Built and verified end-to-end on a 65 W laptop **RTX 2060 (sm_75)** under WSL2 — the goal is bringing consumer and older Turing+ NVIDIA GPUs into FHE workloads, reproducibly, for anyone who clones this repo.
 
-## What's actually in this repo
+## Verified results
 
-| Piece | What it is |
+RTX 2060 Max-Q (65 W laptop), locked clocks, median of 7 reps. CUDA 13.2, driver 595.97, WSL2 Ubuntu 24.04, OpenFHE v1.5.1 @ `ed361af2`.
+
+| Metric | Result |
 |---|---|
-| `openfhe_cuda_hal` (`src/`, `kernels/`, `include/`) | The GPU HAL itself: CUDA kernels for negacyclic NTT, RNS pointwise multiply, key-switching, plus a small DAG compiler (`fhe_compiler.cpp`/`global_dag.cpp`) that schedules GPU ops. |
-| `patches/` + `patch_openfhe.py` | Patches applied to an existing OpenFHE source checkout so its `DCRTPoly`/`NativePoly` operators can call out to the GPU HAL instead of the stock CPU path. |
-| `dumbo/` | Python demo: three independently-runnable services (`edge`, `hub`, `failover`) that simulate an edge node encrypting telemetry, an untrusted hub relaying it, and a failover node decrypting + routing — see [`DUMBO_PROTOCOL.md`](./DUMBO_PROTOCOL.md) for the full writeup. |
-| `dumbo_ext/` | A pybind11 wrapper (`dumbo_cuda`) exposing the CUDA NTT/encoder kernels directly to Python, used by the demo and `dumbo_showcase.py`. |
-| `dumbo_setup.sh` | Bootstraps the `dumbo/` Python package tree + venv from scratch. |
+| Raw kernel: pointwise RNS multiply, 16 towers x N=32768 | ~0.20 ms/op (~2.5-2.7 G coeff-mults/s) |
+| Kernel time per launch (nsys, cached device buffers) | ~4.2 us (was 117 us with managed memory) |
+| HAL EvalMult path, 16 towers, N=32k | ~16 ms (4x faster after ShadowRegistry rewrite) |
+| CKKS e2e EvalMult, GPU vs CPU | statistical tie (~50-100 ms both) — see Status |
+| CKKS e2e Decrypt, GPU vs CPU | parity (~20-35 ms both) |
+| CKKS correctness (all stages through GPU) | max error ~1e-12, verified vs plaintext |
 
-The GPU HAL and the Dumbo Protocol demo are two layers of the same project: the HAL is the general-purpose
-CUDA acceleration layer, Dumbo is one concrete application of it (encrypted telemetry handoff), used here
-mainly to exercise and showcase the HAL under a realistic workload.
+GPU execution in every CKKS stage (keygen / encrypt / EvalMult tensor product / decrypt) is profiler-verified (`nsys` + built-in call tracing), not assumed.
 
-## Prerequisites
+**Honest status:** end-to-end EvalMult is currently at CPU parity, not ahead. The multiplies run on the GPU, but each dispatch pays pageable host<->device transfer cost, and keyswitch/relinearization — the largest share of EvalMult — still runs on CPU. Both are active roadmap items below. Numbers on a desktop GPU outside WSL should be materially better; benchmark PRs welcome (see Contributing).
 
-- NVIDIA GPU, CUDA-capable (tested on RTX 2060 / sm_75; CMake also targets sm_80, sm_86)
-- CUDA Toolkit 12.x+ (tested against 13.2) — installed *inside* WSL if you're on Windows, not just the Windows-side driver
-- CMake 3.18+
-- GCC/G++ with C++17 and OpenMP support
-- An OpenFHE build installed at `/usr/local` (`libOPENFHEpke.so`, `libOPENFHEcore.so`, `libOPENFHEbinfhe.so` + headers under `/usr/local/include/openfhe`) — required for the end-to-end (`test_e2e_*`, `bench_vs_cpu`) targets. Without it, CMake still builds the HAL and the DAG/NTT test targets, just skips the OpenFHE-integrated ones.
-- Python 3.12+ (only needed for the `dumbo/` demo and `dumbo_ext` pybind module)
+## Requirements
 
-Check your toolchain before building:
-```bash
-nvidia-smi          # confirms the GPU is visible to WSL
-nvcc --version       # confirms the CUDA toolkit is installed inside WSL
-cmake --version
-```
+- NVIDIA GPU, **Turing (sm_75) or newer** (CUDA 13 dropped pre-Turing support; older GPUs would need CUDA 12.x — untested)
+- CUDA toolkit installed inside Linux/WSL (`nvcc` must work), CMake >= 3.24, GCC 13
+- OpenFHE **v1.5.1 at commit `ed361af2`** — the patcher pins to this; other versions will be rejected
 
-## Building the GPU HAL
+## Install
 
-Work inside the Linux filesystem (`~/`), not `/mnt/c/...` — much faster and avoids permission issues.
+Order matters: the HAL must be built **before** patching OpenFHE (the patched build links `build/libopenfhe_cuda_hal.so` by absolute path — don't move this repo afterwards).
 
 ```bash
+# 1. Build the HAL
 git clone https://github.com/samfrazerdutton/openfheNVDIA-GPU.git
-cd openfheNVDIA-GPU
+cd openfheNVDIA-GPU && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=native
+make -j$(nproc) openfhe_cuda_hal
+
+# 2. Clone, pin, patch, and build OpenFHE (~20-40 min)
+cd ~ && git clone https://github.com/openfheorg/openfhe-development.git
+cd openfhe-development && git checkout ed361af2
+python3 ~/openfheNVDIA-GPU/patch_openfhe.py ~/openfhe-development
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=75   # 75 for RTX 20-series; 80/86 for Ampere
-make -j$(nproc)
+cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_UNITTESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF
+make -j$(nproc) && sudo make install && sudo ldconfig
+
+# 3. Build everything in this repo and verify
+cd ~/openfheNVDIA-GPU/build && cmake .. && make -j$(nproc)
+./test_dag && ./test_e2e_ckks    # both must print [PASS]
 ```
 
-This produces `libopenfhe_cuda_hal.so` plus the test/benchmark executables below.
+## Runtime controls
 
-### Patching OpenFHE itself (optional, needed for e2e targets)
-
-If you want the `test_e2e_*` / `bench_vs_cpu` targets to link against a *patched* OpenFHE that routes through
-the GPU HAL rather than stock CPU code:
-
-```bash
-python3 patch_openfhe.py /path/to/openfhe-development
-```
-
-This rewrites `DCRTPoly`'s multiply/keyswitch operators to call into `openfhe_cuda_hal`, guarded by a version
-marker (currently `GPU_HAL_PATCHED_V7`) so re-running the patcher against an already-patched tree is a no-op
-rather than double-patching.
-
-## Test & benchmark targets
-
-| Binary | What it checks |
+| Env var | Effect |
 |---|---|
-| `test_dag` | DAG compiler correctness — builds and executes a small op graph, checks the result. |
-| `test_e2e_ckks` | Full CKKS round trip (keygen → encrypt → GPU EvalMult → decrypt) against expected plaintext values. |
-| `test_e2e_p34` | Same idea, targeting the P34 parameter set. |
-| `benchmark` | CKKS-pipeline throughput (coeff-mults/sec) at a given ring degree/tower count. |
-| `benchmark_duality` | Re-validates negacyclic NTT correctness (GPU vs CPU-reference vs analytic reference, bit-exact) then reports pointwise-RNS and NTT-multiply throughput in isolation. |
-| `bench_vs_cpu` | Same operation, CPU-only (OpenMP) path — the number to compare GPU results against. |
-| `bench_evalmult` | GPU latency scaling across ring sizes (16k/32k/64k). |
-| `run_benchmark.sh` | Convenience script: builds `bench_vs_cpu` and runs it both without and with the GPU HAL preloaded (`LD_PRELOAD=libopenfhe_cuda_hal.so`). |
+| `OPENFHE_GPU=0` | Kill switch — full CPU path, same binary. This is how the CPU/GPU A/B comparisons are made. |
+| `OPENFHE_GPU_LOG=1` | Print every GPU dispatch (call #, towers, ring) to verify what actually runs on the GPU. |
 
-Run them from `build/`:
-```bash
-./test_dag && ./test_e2e_ckks
-./benchmark
-./bench_vs_cpu
-./benchmark_duality
-./bench_evalmult
-```
+## Benchmarking
 
-### Measured results (RTX 2060, sm_75, 32768-degree ring unless noted)
+`scripts/bench_true.sh` runs the full suite 7x with GPU telemetry logging and writes median tables to `results/`. Methodology: lock GPU clocks first (`nvidia-smi -lgc 960,1350` from Windows admin PowerShell for WSL), run on AC power from a cool machine, report medians, publish the temperature range alongside the numbers. WSL adds run-to-run variance that locked clocks do not fully remove — treat single runs as noise.
 
-- **Correctness**: DAG execution, CKKS round-trip (error ~1e-11 to 1e-12 — expected CKKS approximation noise, not a bug), and negacyclic NTT (bit-exact GPU vs CPU vs analytic reference) all pass.
-- **CKKS pipeline throughput**: 16 towers → 0.229 ms/op, ~2285 M coeff-mults/sec.
-- **CPU-only comparison** (`bench_vs_cpu`, 11 towers): 75.16 ms mean latency — roughly two orders of magnitude slower than the GPU path above.
-- **Isolated primitives** (`benchmark_duality`): pointwise RNS multiply ~42-45 M coeff-mults/sec; full NTT-based polynomial multiply ~9.3-9.5 M coeff-mults/sec. These are lower than the CKKS-pipeline number above because they measure cheaper, more granular operations — not a regression.
-- **Latency scaling** (`bench_evalmult`): 16 towers — 40.79 ms (N=16k), 88.50 ms (N=32k), 132.22 ms (N=64k).
-
-Numbers will vary by GPU; re-run the suite on your own hardware to get comparable figures.
-
-## Dumbo Protocol demo
-
-Three-node encrypted telemetry handoff: an edge node encrypts stress telemetry, an untrusted hub relays the
-ciphertext without being able to read it, and a failover node decrypts and makes routing decisions.
+For the honest e2e comparison:
 
 ```bash
-./dumbo_setup.sh          # builds the dumbo/ package tree + Python venv
-source dumbo/venv/bin/activate
-export PYTHONPATH=.
-python3 dumbo_showcase.py
+for i in 1 2 3 4 5; do OPENFHE_GPU=0 ./test_e2e_ckks | grep EvalMult; done   # CPU
+for i in 1 2 3 4 5; do ./test_e2e_ckks | grep EvalMult; done                 # GPU
 ```
-
-Two modes, controlled by `DUMBO_FHE_REAL`:
-
-- **Mode A — Real BFV (`DUMBO_FHE_REAL=1`, default)**: genuine OpenFHE BFV encryption. The hub only ever sees
-  opaque ciphertext; it cannot recover telemetry even with the mixing structure, since it lacks the secret key.
-- **Mode B — Plaintext polynomial packing (`DUMBO_FHE_REAL=0`)**: uses the GPU NTT encoder to pack telemetry
-  into a polynomial with a *public* mixing matrix — **not encryption**. Anyone who knows the polynomial degree
-  and modulus can invert it. This mode exists purely to benchmark the GPU HAL's raw packing performance without
-  BFV overhead, and is labeled `mode=plaintext_polynomial` in all log output. Don't use it where telemetry
-  privacy actually matters.
-
-See [`DUMBO_PROTOCOL.md`](./DUMBO_PROTOCOL.md) for the full architecture writeup, including exactly which CUDA
-kernels run per encode call and how the modular arithmetic (`mulmod64` via `__umul64hi` + Barrett reduction) is
-implemented.
 
 ## Repository layout
-CMakeLists.txt          # GPU HAL + test/benchmark build targets
-src/                    # HAL source (cuda_hal, DAG compiler, keyswitch, evalmult, benchmarks)
-kernels/                # CUDA kernels (NTT, RNS math, keyswitch)
-include/                # HAL headers (VRAM cache/pool, stream pool, DAG registries)
-patches/                # Patches applied to an OpenFHE checkout by patch_openfhe.py
-patch_openfhe.py         # Applies the above patches, idempotently
-dumbo/                  # Edge / hub / failover Python services + shared FHE utilities
-dumbo_ext/               # pybind11 wrapper exposing CUDA kernels to Python
-dumbo_setup.sh           # Bootstraps dumbo/ + its venv
-dumbo_showcase.py         # End-to-end demo runner
-run_benchmark.sh          # bench_vs_cpu with/without GPU HAL preloaded
-DUMBO_PROTOCOL.md         # Dumbo Protocol architecture deep-dive
-`build/` is gitignored — always a fresh `mkdir build && cd build && cmake ..`, never committed.
 
-## Known issues
+```
+CMakeLists.txt        HAL + test/benchmark build targets
+src/                  HAL source (cuda_hal, DAG compiler, keyswitch, benchmarks)
+kernels/              CUDA kernels (Montgomery RNS math, negacyclic NTT, keyswitch)
+include/              ShadowRegistry (device-buffer cache), stream pool, DAG registries
+patch_openfhe.py      Applies GPU hooks to a pinned OpenFHE checkout (v9)
+scripts/bench_true.sh Benchmark harness with telemetry + median reporting
+results/              Published benchmark summaries (RESULTS_*.md)
+dumbo/, dumbo_ext/    Edge/hub Python services + pybind11 CUDA bindings (Dumbo Protocol)
+```
 
-- `gpu_engine.cpp` has a handful of harmless `-Wformat` warnings (`%llu` vs `%lu` for `size_t` args) — cosmetic, doesn't affect correctness on 64-bit platforms.
-- `CMAKE_CUDA_ARCHITECTURES` defaults to `"75;80;86"`; override with `-DCMAKE_CUDA_ARCHITECTURES=<yours>` to cut build time on a single-GPU dev box.
-- The end-to-end targets (`test_e2e_*`, `bench_vs_cpu`) only build if OpenFHE is found at `/usr/local` — check the CMake configure output for "OpenFHE found — building e2e targets" vs "OpenFHE not found — skipping e2e targets".
+## Architecture notes
+
+- The patcher injects GPU dispatch into `DCRTPolyImpl::operator*=` and `DCRTPolyImpl::Times()` — the latter is the path CKKS EvalMult/keygen/encrypt actually use. Dispatch requires eval format, ring >= 4096, and <= 64 towers.
+- `ShadowRegistry` caches real `cudaMalloc` device buffers keyed by host pointer; inputs are re-copied per call, so stale mappings can never serve stale data.
+- A library constructor initializes the CUDA context + stream pool at load, keeping the ~300 ms first-touch cost (WSL) out of every timed operation.
+- Host `cudaHostRegister` pinning was tried and reverted: OpenFHE frees temporaries while registered, leaving dangling pin state on reused addresses. The planned fix is HAL-owned pinned staging buffers.
+
+## Roadmap
+
+1. **HAL-owned pinned staging buffers** — restore DMA-speed transfers safely; expected to move e2e EvalMult past CPU.
+2. **Keyswitch/relinearization on GPU** — the largest CPU share of EvalMult; where parity becomes a multiple.
+3. **VRAM residency across operations** — keep ciphertexts on-device through op chains via the DAG compiler.
+4. CI (compile matrix), CUDA 12.x support for pre-Turing GPUs, Dockerfile.
+
+## Contributing
+
+Benchmark reports from other GPUs are especially welcome — run `scripts/bench_true.sh`, note your GPU/driver/CUDA/cooling, and open a PR adding your `RESULTS_*.md`. Desktop cards and non-WSL Linux numbers are the most valuable missing data.
 
 ## License
 
-MIT License. Created by Sam Frazer Dutton (Billinghurst).
+MIT — see [LICENSE](LICENSE). Created by Sam Frazer Dutton.

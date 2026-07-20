@@ -29,7 +29,7 @@ hal_so = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "build", "libopenfhe_cuda_hal.so")
 cudart = "/usr/local/cuda/lib64/libcudart.so"
 
-print("[*] OpenFHE NVIDIA GPU HAL Patcher v8")
+print("[*] OpenFHE NVIDIA GPU HAL Patcher v9")
 if not os.path.exists(hal_so):
     sys.exit(f"[!] HAL not built yet: {hal_so}\n    Build it first: cd openfheNVDIA-GPU && mkdir -p build && cd build && cmake .. && make openfhe_cuda_hal")
 

@@ -27,3 +27,7 @@ dumbo/state/*.json
 # Profiling output
 *.nsys-rep
 *.sqlite
+
+# Benchmark raw data (keep RESULTS_*.md summaries only)
+results/raw_*.log
+results/telemetry_*.csv
