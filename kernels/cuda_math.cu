@@ -56,7 +56,9 @@ extern "C" void LaunchRNSMultBarrett(
     uint64_t mod, uint64_t mu_hi, uint32_t n, cudaStream_t stream)
 {
     // mu_hi ignored -- exact fallback is correct and avoids approximation error.
+    // Restored: this symbol is linked against by the patched OpenFHE core
+    // library at /usr/local/lib (from patch_openfhe.py), not just this repo --
+    // removing it breaks the link even though nothing in-repo calls it.
     uint32_t blocks = (n + 255) / 256;
     rns_mult_exact_kernel<<<blocks, 256, 0, stream>>>(d_a, d_b, d_res, mod, n);
 }
-

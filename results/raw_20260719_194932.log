@@ -1,0 +1,267 @@
+=== environment ===
+name, driver_version, temperature.gpu, clocks.current.sm [MHz], power.limit [W]
+NVIDIA GeForce RTX 2060 with Max-Q Design, 595.97, 69, 960 MHz, [N/A]
+=== warmup ===
+=== benchmark x 7 ===
+--- rep 1 ---
+[BENCH] 16 towers x 32768 ring: 0.210 ms/op
+[BENCH] throughput: 2500.1 M coeff-mults/sec
+--- rep 2 ---
+[BENCH] 16 towers x 32768 ring: 0.201 ms/op
+[BENCH] throughput: 2605.5 M coeff-mults/sec
+--- rep 3 ---
+[BENCH] 16 towers x 32768 ring: 0.205 ms/op
+[BENCH] throughput: 2558.1 M coeff-mults/sec
+--- rep 4 ---
+[BENCH] 16 towers x 32768 ring: 0.197 ms/op
+[BENCH] throughput: 2657.5 M coeff-mults/sec
+--- rep 5 ---
+[BENCH] 16 towers x 32768 ring: 0.187 ms/op
+[BENCH] throughput: 2802.4 M coeff-mults/sec
+--- rep 6 ---
+[BENCH] 16 towers x 32768 ring: 0.188 ms/op
+[BENCH] throughput: 2782.1 M coeff-mults/sec
+--- rep 7 ---
+[BENCH] 16 towers x 32768 ring: 0.196 ms/op
+[BENCH] throughput: 2671.7 M coeff-mults/sec
+=== bench_evalmult x 7 ===
+--- rep 1 ---
+========================================
+ CUDA HAL Benchmark
+========================================
+  16 towers, N=16k           GPU:  38.03 ms
+  16 towers, N=32k           GPU:  61.79 ms
+  16 towers, N=64k           GPU: 110.07 ms
+--- rep 2 ---
+========================================
+ CUDA HAL Benchmark
+========================================
+  16 towers, N=16k           GPU:  31.75 ms
+  16 towers, N=32k           GPU:  60.55 ms
+  16 towers, N=64k           GPU: 111.50 ms
+--- rep 3 ---
+========================================
+ CUDA HAL Benchmark
+========================================
+  16 towers, N=16k           GPU:  32.57 ms
+  16 towers, N=32k           GPU:  60.28 ms
+  16 towers, N=64k           GPU: 103.13 ms
+--- rep 4 ---
+========================================
+ CUDA HAL Benchmark
+========================================
+  16 towers, N=16k           GPU:  32.00 ms
+  16 towers, N=32k           GPU:  64.39 ms
+  16 towers, N=64k           GPU: 112.15 ms
+--- rep 5 ---
+========================================
+ CUDA HAL Benchmark
+========================================
+  16 towers, N=16k           GPU:  29.81 ms
+  16 towers, N=32k           GPU:  61.03 ms
+  16 towers, N=64k           GPU: 110.27 ms
+--- rep 6 ---
+========================================
+ CUDA HAL Benchmark
+========================================
+  16 towers, N=16k           GPU:  29.14 ms
+  16 towers, N=32k           GPU:  61.66 ms
+  16 towers, N=64k           GPU: 111.81 ms
+--- rep 7 ---
+========================================
+ CUDA HAL Benchmark
+========================================
+  16 towers, N=16k           GPU:  31.41 ms
+  16 towers, N=32k           GPU:  59.49 ms
+  16 towers, N=64k           GPU: 112.00 ms
+=== test_e2e_ckks x 7 ===
+--- rep 1 ---
+======================================================
+[*] OpenFHE NVIDIA GPU HAL -- End-to-End CKKS Test
+======================================================
+
+[1] Key generation: 144.90 ms
+[2] Encrypt: 106.12 ms
+[3] EvalMult: 83.45 ms
+[4] Decrypt: 333.18 ms
+    [0] exp=0.05000000 got=0.05000000 err=3.79e-12
+    [1] exp=0.10200000 got=0.10200000 err=4.26e-14
+    [2] exp=0.15600000 got=0.15600000 err=7.30e-12
+    [3] exp=0.21200000 got=0.21200000 err=8.02e-12
+    [4] exp=0.27000000 got=0.27000000 err=1.22e-12
+    [5] exp=0.33000000 got=0.33000000 err=1.32e-12
+    [6] exp=0.39200000 got=0.39200000 err=6.16e-12
+    [7] exp=0.40000000 got=0.40000000 err=7.42e-12
+
+Max error: 0.00
+[PASS]
+--- rep 2 ---
+======================================================
+[*] OpenFHE NVIDIA GPU HAL -- End-to-End CKKS Test
+======================================================
+
+[1] Key generation: 139.15 ms
+[2] Encrypt: 91.05 ms
+[3] EvalMult: 77.75 ms
+[4] Decrypt: 321.47 ms
+    [0] exp=0.05000000 got=0.05000000 err=1.09e-12
+    [1] exp=0.10200000 got=0.10200000 err=2.29e-12
+    [2] exp=0.15600000 got=0.15600000 err=4.76e-12
+    [3] exp=0.21200000 got=0.21200000 err=1.80e-13
+    [4] exp=0.27000000 got=0.27000000 err=9.67e-13
+    [5] exp=0.33000000 got=0.33000000 err=9.56e-13
+    [6] exp=0.39200000 got=0.39200000 err=3.72e-13
+    [7] exp=0.40000000 got=0.40000000 err=4.54e-12
+
+Max error: 0.00
+[PASS]
+--- rep 3 ---
+======================================================
+[*] OpenFHE NVIDIA GPU HAL -- End-to-End CKKS Test
+======================================================
+
+[1] Key generation: 147.58 ms
+[2] Encrypt: 106.75 ms
+[3] EvalMult: 91.39 ms
+[4] Decrypt: 303.19 ms
+    [0] exp=0.05000000 got=0.05000000 err=1.60e-12
+    [1] exp=0.10200000 got=0.10200000 err=5.80e-12
+    [2] exp=0.15600000 got=0.15600000 err=7.17e-13
+    [3] exp=0.21200000 got=0.21200000 err=1.84e-12
+    [4] exp=0.27000000 got=0.27000000 err=1.94e-12
+    [5] exp=0.33000000 got=0.33000000 err=1.30e-12
+    [6] exp=0.39200000 got=0.39200000 err=2.90e-12
+    [7] exp=0.40000000 got=0.40000000 err=6.63e-12
+
+Max error: 0.00
+[PASS]
+--- rep 4 ---
+======================================================
+[*] OpenFHE NVIDIA GPU HAL -- End-to-End CKKS Test
+======================================================
+
+[1] Key generation: 138.34 ms
+[2] Encrypt: 90.55 ms
+[3] EvalMult: 55.21 ms
+[4] Decrypt: 296.91 ms
+    [0] exp=0.05000000 got=0.05000000 err=5.55e-12
+    [1] exp=0.10200000 got=0.10200000 err=2.39e-12
+    [2] exp=0.15600000 got=0.15600000 err=1.70e-12
+    [3] exp=0.21200000 got=0.21200000 err=6.15e-12
+    [4] exp=0.27000000 got=0.27000000 err=1.56e-12
+    [5] exp=0.33000000 got=0.33000000 err=5.61e-12
+    [6] exp=0.39200000 got=0.39200000 err=6.79e-12
+    [7] exp=0.40000000 got=0.40000000 err=3.17e-13
+
+Max error: 0.00
+[PASS]
+--- rep 5 ---
+======================================================
+[*] OpenFHE NVIDIA GPU HAL -- End-to-End CKKS Test
+======================================================
+
+[1] Key generation: 148.52 ms
+[2] Encrypt: 88.23 ms
+[3] EvalMult: 84.78 ms
+[4] Decrypt: 295.65 ms
+    [0] exp=0.05000000 got=0.05000000 err=5.04e-13
+    [1] exp=0.10200000 got=0.10200000 err=9.76e-13
+    [2] exp=0.15600000 got=0.15600000 err=1.40e-12
+    [3] exp=0.21200000 got=0.21200000 err=3.96e-12
+    [4] exp=0.27000000 got=0.27000000 err=1.42e-12
+    [5] exp=0.33000000 got=0.33000000 err=3.97e-12
+    [6] exp=0.39200000 got=0.39200000 err=1.22e-11
+    [7] exp=0.40000000 got=0.40000000 err=1.18e-11
+
+Max error: 0.00
+[PASS]
+--- rep 6 ---
+======================================================
+[*] OpenFHE NVIDIA GPU HAL -- End-to-End CKKS Test
+======================================================
+
+[1] Key generation: 142.86 ms
+[2] Encrypt: 101.54 ms
+[3] EvalMult: 67.91 ms
+[4] Decrypt: 305.53 ms
+    [0] exp=0.05000000 got=0.05000000 err=1.86e-12
+    [1] exp=0.10200000 got=0.10200000 err=3.19e-12
+    [2] exp=0.15600000 got=0.15600000 err=5.62e-12
+    [3] exp=0.21200000 got=0.21200000 err=7.02e-12
+    [4] exp=0.27000000 got=0.27000000 err=3.08e-12
+    [5] exp=0.33000000 got=0.33000000 err=1.75e-12
+    [6] exp=0.39200000 got=0.39200000 err=5.49e-13
+    [7] exp=0.40000000 got=0.40000000 err=5.48e-12
+
+Max error: 0.00
+[PASS]
+--- rep 7 ---
+======================================================
+[*] OpenFHE NVIDIA GPU HAL -- End-to-End CKKS Test
+======================================================
+
+[1] Key generation: 130.85 ms
+[2] Encrypt: 85.46 ms
+[3] EvalMult: 48.46 ms
+[4] Decrypt: 304.23 ms
+    [0] exp=0.05000000 got=0.05000000 err=2.12e-12
+    [1] exp=0.10200000 got=0.10200000 err=4.82e-12
+    [2] exp=0.15600000 got=0.15600000 err=3.69e-12
+    [3] exp=0.21200000 got=0.21200000 err=8.21e-12
+    [4] exp=0.27000000 got=0.27000000 err=7.16e-13
+    [5] exp=0.33000000 got=0.33000000 err=3.65e-12
+    [6] exp=0.39200000 got=0.39200000 err=8.36e-12
+    [7] exp=0.40000000 got=0.40000000 err=1.56e-12
+
+Max error: 0.00
+[PASS]
+=== bench_vs_cpu x 7 ===
+--- rep 1 ---
+======================================================
+[*] CPU (Native OpenMP) Benchmark
+======================================================
+Ring dim : 32768 | Towers : 11 | Reps : 25
+Mean Latency: 53.51 ms
+
+--- rep 2 ---
+======================================================
+[*] CPU (Native OpenMP) Benchmark
+======================================================
+Ring dim : 32768 | Towers : 11 | Reps : 25
+Mean Latency: 52.05 ms
+
+--- rep 3 ---
+======================================================
+[*] CPU (Native OpenMP) Benchmark
+======================================================
+Ring dim : 32768 | Towers : 11 | Reps : 25
+Mean Latency: 57.08 ms
+
+--- rep 4 ---
+======================================================
+[*] CPU (Native OpenMP) Benchmark
+======================================================
+Ring dim : 32768 | Towers : 11 | Reps : 25
+Mean Latency: 51.94 ms
+
+--- rep 5 ---
+======================================================
+[*] CPU (Native OpenMP) Benchmark
+======================================================
+Ring dim : 32768 | Towers : 11 | Reps : 25
+Mean Latency: 56.58 ms
+
+--- rep 6 ---
+======================================================
+[*] CPU (Native OpenMP) Benchmark
+======================================================
+Ring dim : 32768 | Towers : 11 | Reps : 25
+Mean Latency: 53.56 ms
+
+--- rep 7 ---
+======================================================
+[*] CPU (Native OpenMP) Benchmark
+======================================================
+Ring dim : 32768 | Towers : 11 | Reps : 25
+Mean Latency: 52.81 ms
+

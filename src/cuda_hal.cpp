@@ -93,17 +93,22 @@ extern "C" void gpu_rns_mult_batch_wrapper(
     size_t bytes = (size_t)ring * sizeof(uint64_t);
     auto& reg = ShadowRegistry::Instance();
 
+    // d_out is now cached the same way da/db already were: keyed by the real,
+    // unique output host pointer via ShadowRegistry. ShadowRegistry already
+    // proved safe under 8 concurrent OMP threads for da/db -- reusing that
+    // exact mechanism (rather than a new pool keyed only by tower index)
+    // avoids the per-call cudaMalloc/cudaFree without introducing a new
+    // buffer-aliasing race across concurrent callers.
     std::vector<uint64_t*> d_out(num_towers, nullptr);
-    for (uint32_t i = 0; i < num_towers; i++)
-        CUDA_CHECK(cudaMalloc(&d_out[i], bytes));
 
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
         uint64_t* da = reg.GetDevicePtr(ha[i], bytes);
         uint64_t* db = reg.GetDevicePtr(hb[i], bytes);
+        d_out[i]      = reg.GetDevicePtr(hr[i], bytes);
         // cudaMemcpyDefault: required for cudaMallocManaged buffers.
         // cudaMemcpyHostToDevice is illegal when dst is a managed pointer.
-        if (!da || !db ) {
+        if (!da || !db || !d_out[i]) {
             throw std::runtime_error("[CUDA HAL] Null pointer from cudaMallocManaged. VRAM exhausted.");
         }
         CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyDefault, s));
@@ -113,10 +118,10 @@ extern "C" void gpu_rns_mult_batch_wrapper(
     }
     openfhe_cuda::StreamPool::Instance().SyncAll();
 
-    for (uint32_t i = 0; i < num_towers; i++) {
+    for (uint32_t i = 0; i < num_towers; i++)
         CUDA_CHECK(cudaMemcpy(hr[i], d_out[i], bytes, cudaMemcpyDeviceToHost));
-        cudaFree(d_out[i]);
-    }
+    // No cudaFree -- ShadowRegistry retains ownership and reuses this
+    // allocation the next time the same host pointer is seen.
 }
 
 extern "C" void gpu_poly_mult_wrapper(
@@ -126,12 +131,16 @@ extern "C" void gpu_poly_mult_wrapper(
     openfhe_cuda::StreamPool::Instance().Init(32);
     size_t bytes = (size_t)ring * sizeof(uint64_t);
     auto& reg = ShadowRegistry::Instance();
-    static uint64_t scratch_a[64];
-    static uint64_t scratch_b[64];
+
+    // Dynamically sized -- no hardcoded tower cap (previously a fixed
+    // 64-entry static array with no bounds check: silent memory corruption
+    // past 64 towers).
+    static std::vector<uint64_t> scratch_a;
+    static std::vector<uint64_t> scratch_b;
+    if (scratch_a.size() < num_towers) scratch_a.resize(num_towers);
+    if (scratch_b.size() < num_towers) scratch_b.resize(num_towers);
 
     std::vector<uint64_t*> d_out(num_towers, nullptr);
-    for (uint32_t i = 0; i < num_towers; i++)
-        CUDA_CHECK(cudaMalloc(&d_out[i], bytes));
 
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
@@ -139,7 +148,8 @@ extern "C" void gpu_poly_mult_wrapper(
         uint64_t q_inv = calc_q_inv(q[i]);
         uint64_t* da = reg.GetDevicePtr(&scratch_a[i], bytes);
         uint64_t* db = reg.GetDevicePtr(&scratch_b[i], bytes);
-        if (!da || !db ) {
+        d_out[i]      = reg.GetDevicePtr(hr[i], bytes);
+        if (!da || !db || !d_out[i]) {
             throw std::runtime_error("[CUDA HAL] Null pointer from cudaMallocManaged. VRAM exhausted.");
         }
         CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyDefault, s));
@@ -151,10 +161,10 @@ extern "C" void gpu_poly_mult_wrapper(
     }
     openfhe_cuda::StreamPool::Instance().SyncAll();
 
-    for (uint32_t i = 0; i < num_towers; i++) {
+    for (uint32_t i = 0; i < num_towers; i++)
         CUDA_CHECK(cudaMemcpy(hr[i], d_out[i], bytes, cudaMemcpyDeviceToHost));
-        cudaFree(d_out[i]);
-    }
+    // No cudaFree -- ShadowRegistry retains ownership and reuses this
+    // allocation the next time the same host pointer is seen.
 }
 
 extern "C" void gpu_rns_mult_wrapper(
@@ -169,7 +179,9 @@ extern "C" void gpu_synchronize_all() {
     openfhe_cuda::StreamPool::Instance().SyncAll();
 }
 
-extern "C" void gpu_clear_vram_cache() { ShadowRegistry::Instance().Clear(); }
+extern "C" void gpu_clear_vram_cache() {
+    ShadowRegistry::Instance().Clear();
+}
 
 extern "C" void gpu_prepare_for_decrypt() {
     openfhe_cuda::StreamPool::Instance().SyncAll();
