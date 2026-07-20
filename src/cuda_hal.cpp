@@ -7,6 +7,7 @@
 #include <mutex>
 #include <vector>
 #include <cuda_runtime.h>
+#include <cstring>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -113,30 +114,52 @@ extern "C" void gpu_rns_mult_batch_wrapper(
     size_t bytes = (size_t)ring * sizeof(uint64_t);
     auto& reg = ShadowRegistry::Instance();
 
-    // d_out is now cached the same way da/db already were: keyed by the real,
-    // unique output host pointer via ShadowRegistry. ShadowRegistry already
-    // proved safe under 8 concurrent OMP threads for da/db -- reusing that
-    // exact mechanism (rather than a new pool keyed only by tower index)
-    // avoids the per-call cudaMalloc/cudaFree without introducing a new
-    // buffer-aliasing race across concurrent callers.
+    // Pinned staging path (Fix 1): host -> HAL-owned pinned buffer (memcpy)
+    // -> device (true async DMA); results come back the same way. The HAL
+    // owns the pinned memory (cudaMallocHost, reused forever), so OpenFHE
+    // freeing its own buffers can never dangle a registration. If pinned
+    // allocation fails we fall back to pageable copies (slower, correct).
     std::vector<uint64_t*> d_out(num_towers, nullptr);
+    auto& pool = PinnedStagingPool::Instance();
+    std::vector<void*> st_a(num_towers, nullptr), st_b(num_towers, nullptr),
+                       st_r(num_towers, nullptr);
+    bool staged = true;
+    for (uint32_t i = 0; i < num_towers; i++) {
+        st_a[i] = pool.Acquire(bytes);
+        st_b[i] = pool.Acquire(bytes);
+        st_r[i] = pool.Acquire(bytes);
+        if (!st_a[i] || !st_b[i] || !st_r[i]) staged = false;
+    }
 
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
-        // NOTE: no cudaHostRegister here. OpenFHE frees temporaries while
-        // still registered, leaving dangling pin state on reused addresses
-        // (-> cudaMemcpyAsync invalid argument). Pinning needs HAL-owned
-        // staging buffers; until then, pageable copies are correct and safe.
         uint64_t* da = reg.GetDevicePtr(ha[i], bytes);
         uint64_t* db = reg.GetDevicePtr(hb[i], bytes);
         d_out[i]      = reg.GetDevicePtr(hr[i], bytes);
-        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
-        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
+        if (staged) {
+            std::memcpy(st_a[i], ha[i], bytes);
+            std::memcpy(st_b[i], hb[i], bytes);
+            CUDA_CHECK(cudaMemcpyAsync(da, st_a[i], bytes, cudaMemcpyHostToDevice, s));
+            CUDA_CHECK(cudaMemcpyAsync(db, st_b[i], bytes, cudaMemcpyHostToDevice, s));
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
+            CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
+        }
         LaunchRNSMultMontgomery(da, db, d_out[i],
             q[i], calc_q_inv(q[i]), calc_R2(q[i]), ring, s);
-        CUDA_CHECK(cudaMemcpyAsync(hr[i], d_out[i], bytes, cudaMemcpyDeviceToHost, s));
+        if (staged)
+            CUDA_CHECK(cudaMemcpyAsync(st_r[i], d_out[i], bytes, cudaMemcpyDeviceToHost, s));
+        else
+            CUDA_CHECK(cudaMemcpyAsync(hr[i], d_out[i], bytes, cudaMemcpyDeviceToHost, s));
     }
     openfhe_cuda::StreamPool::Instance().SyncAll();
+
+    for (uint32_t i = 0; i < num_towers; i++) {
+        if (staged) std::memcpy(hr[i], st_r[i], bytes);
+        pool.Release(st_a[i]);
+        pool.Release(st_b[i]);
+        pool.Release(st_r[i]);
+    }
     // No cudaFree -- ShadowRegistry retains ownership and reuses this
     // allocation the next time the same host pointer is seen.
 }

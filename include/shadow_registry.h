@@ -4,19 +4,21 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <array>
+#include <vector>
 #include <cstdint>
 
+// Device-buffer cache: real cudaMalloc memory keyed by host pointer.
+// Inputs are re-copied every call, so a stale host->device mapping can
+// never serve stale data.
 class ShadowRegistry {
     static constexpr int SHARDS = 16;
-    struct Entry    { uint64_t* d_ptr; size_t bytes; };
-    struct PinEntry { size_t bytes; };
+    struct Entry { uint64_t* d_ptr; size_t bytes; };
     struct Shard {
         std::mutex mu;
-        std::unordered_map<const void*, Entry>    map;
-        std::unordered_map<const void*, PinEntry> pinned;
+        std::unordered_map<const void*, Entry> map;
     };
     std::array<Shard, SHARDS> shards_;
-    int idx(const void* p) const { return (int)((uintptr_t)p >> 6 & (SHARDS-1)); }
+    int idx(const void* p) const { return (int)((uintptr_t)p >> 6 & (SHARDS - 1)); }
 
 public:
     static ShadowRegistry& Instance() {
@@ -24,8 +26,6 @@ public:
         return inst;
     }
 
-    // Real device memory (cudaMalloc), cached by host pointer.
-    // No more cudaMallocManaged: copies are explicit, kernels never page-fault.
     uint64_t* GetDevicePtr(const void* h_ptr, size_t bytes) {
         if (!h_ptr) throw std::runtime_error("ShadowRegistry: null host ptr");
         auto& sh = shards_[idx(h_ptr)];
@@ -43,32 +43,11 @@ public:
         return d;
     }
 
-    // Pin an OpenFHE-owned host buffer so async copies are true DMA.
-    // Best-effort: if registration fails we proceed unpinned (slower, still correct).
-    void PinHost(const void* h_ptr, size_t bytes) {
-        if (!h_ptr) return;
-        auto& sh = shards_[idx(h_ptr)];
-        std::lock_guard<std::mutex> lk(sh.mu);
-        auto it = sh.pinned.find(h_ptr);
-        if (it != sh.pinned.end()) {
-            if (it->second.bytes >= bytes) return;
-            cudaHostUnregister(const_cast<void*>(h_ptr));  // same address, bigger buffer
-            sh.pinned.erase(h_ptr);
-        }
-        cudaError_t e = cudaHostRegister(const_cast<void*>(h_ptr), bytes,
-                                         cudaHostRegisterDefault);
-        if (e == cudaSuccess) sh.pinned[h_ptr] = {bytes};
-        else cudaGetLastError();  // clear sticky error; fall back to pageable
-    }
-
     void Clear() {
         for (int i = 0; i < SHARDS; i++) {
             std::lock_guard<std::mutex> lk(shards_[i].mu);
             for (auto& kv : shards_[i].map) cudaFree(kv.second.d_ptr);
             shards_[i].map.clear();
-            for (auto& kv : shards_[i].pinned)
-                cudaHostUnregister(const_cast<void*>(kv.first));
-            shards_[i].pinned.clear();
         }
     }
 
@@ -79,5 +58,62 @@ public:
             total += shards_[i].map.size();
         }
         return total;
+    }
+};
+
+// HAL-owned pinned (page-locked) staging buffers.
+//
+// Why this exists: cudaHostRegister on OpenFHE-owned buffers is unsafe —
+// OpenFHE frees temporaries while still registered, leaving dangling pin
+// state on reused addresses (observed: cudaMemcpyAsync "invalid argument").
+// Instead the HAL owns pinned memory outright via cudaMallocHost, reuses it
+// forever, and data flows host -> staging (CPU memcpy) -> device (true DMA).
+//
+// Acquire/Release are thread-safe. Buffers are never freed during the
+// process lifetime (bounded: a handful of tower-sized buffers reused
+// across every call). If cudaMallocHost fails, Acquire returns nullptr
+// and callers fall back to pageable copies — slower, still correct.
+class PinnedStagingPool {
+    struct Buf { void* p; size_t bytes; };
+    std::mutex mu_;
+    std::vector<Buf> free_;
+    std::unordered_map<void*, size_t> in_use_;
+
+public:
+    static PinnedStagingPool& Instance() {
+        static PinnedStagingPool inst;
+        return inst;
+    }
+
+    void* Acquire(size_t bytes) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            for (size_t i = 0; i < free_.size(); ++i) {
+                if (free_[i].bytes >= bytes) {
+                    Buf b = free_[i];
+                    free_[i] = free_.back();
+                    free_.pop_back();
+                    in_use_[b.p] = b.bytes;
+                    return b.p;
+                }
+            }
+        }
+        void* p = nullptr;
+        if (cudaMallocHost(&p, bytes) != cudaSuccess || !p) {
+            cudaGetLastError();  // clear sticky error; caller falls back to pageable
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lk(mu_);
+        in_use_[p] = bytes;
+        return p;
+    }
+
+    void Release(void* p) {
+        if (!p) return;
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = in_use_.find(p);
+        if (it == in_use_.end()) return;
+        free_.push_back({p, it->second});
+        in_use_.erase(it);
     }
 };
