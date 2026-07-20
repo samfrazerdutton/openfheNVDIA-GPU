@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenFHE NVIDIA GPU HAL Patcher v8.
+"""OpenFHE NVIDIA GPU HAL Patcher v9.
 Verified against openfhe-development ed361af2 (v1.5.1).
 Changes vs v7:
   - #define GPU_HAL_PATCHED_V8 baked into the patched header itself:
@@ -119,6 +119,47 @@ new_op = (
 if old_op not in src:
     sys.exit("[!] operator*= anchor not found — OpenFHE version drift; pin to ed361af2")
 src = src.replace(old_op, new_op, 1)
+
+# ── Times(): the path CKKS EvalMult/keygen/encrypt actually use ──
+old_times = (
+    "        DCRTPolyType tmp(m_params, m_format);\n"
+    "#pragma omp parallel for num_threads(OpenFHEParallelControls.GetThreadLimit(size))\n"
+    "        for (size_t i = 0; i < size; ++i)\n"
+    "            tmp.m_vectors[i] = m_vectors[i].TimesNoCheck(rhs.m_vectors[i]);\n"
+    "        return tmp;"
+)
+new_times = (
+    f"#ifdef {GUARD}\n"
+    "        {\n"
+    "            static const bool gpu_hal_on = [] {\n"
+    "                const char* e = std::getenv(\"OPENFHE_GPU\");\n"
+    "                return !(e && e[0] == '0');\n"
+    "            }();\n"
+    "            uint32_t ring = (uint32_t)m_params->GetRingDimension();\n"
+    "            if (gpu_hal_on && ring >= 4096 && size >= 1 && size <= 64) {\n"
+    "                DCRTPolyType gpu_tmp(m_params, m_format, true);\n"
+    "                static thread_local std::vector<const uint64_t*> ha_ptrs, hb_ptrs;\n"
+    "                static thread_local std::vector<uint64_t*>       hr_ptrs;\n"
+    "                static thread_local std::vector<uint64_t>        moduli;\n"
+    "                ha_ptrs.resize(size); hb_ptrs.resize(size);\n"
+    "                hr_ptrs.resize(size); moduli.resize(size);\n"
+    "                for (size_t i = 0; i < size; ++i) {\n"
+    "                    ha_ptrs[i] = reinterpret_cast<const uint64_t*>(&m_vectors[i].GetValues()[0]);\n"
+    "                    hb_ptrs[i] = reinterpret_cast<const uint64_t*>(&rhs.m_vectors[i].GetValues()[0]);\n"
+    "                    hr_ptrs[i] = reinterpret_cast<uint64_t*>(&gpu_tmp.m_vectors[i][0]);\n"
+    "                    moduli[i]  = m_vectors[i].GetModulus().ConvertToInt();\n"
+    "                }\n"
+    "                gpu_rns_mult_batch_wrapper(ha_ptrs.data(), hb_ptrs.data(), hr_ptrs.data(),\n"
+    "                                           moduli.data(), ring, (uint32_t)size);\n"
+    "                return gpu_tmp;\n"
+    "            }\n"
+    "        }\n"
+    f"#endif // {GUARD}\n"
+    + old_times
+)
+if old_times not in src:
+    sys.exit("[!] Times() anchor not found — OpenFHE version drift; pin to ed361af2")
+src = src.replace(old_times, new_times, 1)
 open(hdr, "w").write(src)
 print("  [+] dcrtpoly.h patched (self-activating, OPENFHE_GPU=0 kill switch)")
 print("\n[SUCCESS] v8 complete. Build OpenFHE, then rebuild your repo (no flags needed).")

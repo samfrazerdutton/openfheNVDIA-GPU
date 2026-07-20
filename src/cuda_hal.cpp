@@ -123,9 +123,10 @@ extern "C" void gpu_rns_mult_batch_wrapper(
 
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
-        reg.PinHost(ha[i], bytes);
-        reg.PinHost(hb[i], bytes);
-        reg.PinHost(hr[i], bytes);
+        // NOTE: no cudaHostRegister here. OpenFHE frees temporaries while
+        // still registered, leaving dangling pin state on reused addresses
+        // (-> cudaMemcpyAsync invalid argument). Pinning needs HAL-owned
+        // staging buffers; until then, pageable copies are correct and safe.
         uint64_t* da = reg.GetDevicePtr(ha[i], bytes);
         uint64_t* db = reg.GetDevicePtr(hb[i], bytes);
         d_out[i]      = reg.GetDevicePtr(hr[i], bytes);
