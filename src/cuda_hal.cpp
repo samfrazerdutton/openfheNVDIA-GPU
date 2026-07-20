@@ -7,6 +7,9 @@
 #include <mutex>
 #include <vector>
 #include <cuda_runtime.h>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 
 #define CUDA_CHECK(call) \
     do { cudaError_t _e = (call); \
@@ -89,6 +92,14 @@ extern "C" void gpu_rns_mult_batch_wrapper(
     const uint64_t** ha, const uint64_t** hb, uint64_t** hr,
     const uint64_t* q, uint32_t ring, uint32_t num_towers)
 {
+    static const bool log_calls = [] {
+        const char* e = std::getenv("OPENFHE_GPU_LOG");
+        return e && e[0] == '1';
+    }();
+    static std::atomic<uint64_t> call_no{0};
+    if (log_calls)
+        fprintf(stderr, "[GPU_LOG] call=%llu towers=%u ring=%u\n",
+                (unsigned long long)++call_no, num_towers, ring);
     openfhe_cuda::StreamPool::Instance().Init(32);
     size_t bytes = (size_t)ring * sizeof(uint64_t);
     auto& reg = ShadowRegistry::Instance();
@@ -103,23 +114,19 @@ extern "C" void gpu_rns_mult_batch_wrapper(
 
     for (uint32_t i = 0; i < num_towers; i++) {
         cudaStream_t s = openfhe_cuda::StreamPool::Instance().Get(i);
+        reg.PinHost(ha[i], bytes);
+        reg.PinHost(hb[i], bytes);
+        reg.PinHost(hr[i], bytes);
         uint64_t* da = reg.GetDevicePtr(ha[i], bytes);
         uint64_t* db = reg.GetDevicePtr(hb[i], bytes);
         d_out[i]      = reg.GetDevicePtr(hr[i], bytes);
-        // cudaMemcpyDefault: required for cudaMallocManaged buffers.
-        // cudaMemcpyHostToDevice is illegal when dst is a managed pointer.
-        if (!da || !db || !d_out[i]) {
-            throw std::runtime_error("[CUDA HAL] Null pointer from cudaMallocManaged. VRAM exhausted.");
-        }
-        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyDefault, s));
-        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyDefault, s));
+        CUDA_CHECK(cudaMemcpyAsync(da, ha[i], bytes, cudaMemcpyHostToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(db, hb[i], bytes, cudaMemcpyHostToDevice, s));
         LaunchRNSMultMontgomery(da, db, d_out[i],
             q[i], calc_q_inv(q[i]), calc_R2(q[i]), ring, s);
+        CUDA_CHECK(cudaMemcpyAsync(hr[i], d_out[i], bytes, cudaMemcpyDeviceToHost, s));
     }
     openfhe_cuda::StreamPool::Instance().SyncAll();
-
-    for (uint32_t i = 0; i < num_towers; i++)
-        CUDA_CHECK(cudaMemcpy(hr[i], d_out[i], bytes, cudaMemcpyDeviceToHost));
     // No cudaFree -- ShadowRegistry retains ownership and reuses this
     // allocation the next time the same host pointer is seen.
 }
