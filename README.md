@@ -91,8 +91,8 @@ dumbo/, dumbo_ext/    Edge/hub Python services + pybind11 CUDA bindings (Dumbo P
 
 ## Roadmap
 
-1. **HAL-owned pinned staging buffers** — restore DMA-speed transfers safely; expected to move e2e EvalMult past CPU.
-2. **Keyswitch/relinearization on GPU** — the largest CPU share of EvalMult; where parity becomes a multiple.
+1. ~~HAL-owned pinned staging buffers~~ — **done** (PinnedStagingPool, pageable fallback).
+2. **Keyswitch inner product on GPU** — done, correct, opt-in via `OPENFHE_GPU_KS=1` (regresses at small params: transfer volume exceeds the CPU inner-product cost; needs eval-key VRAM residency + Barrett MAC to win).
 3. **VRAM residency across operations** — keep ciphertexts on-device through op chains via the DAG compiler.
 4. CI (compile matrix), CUDA 12.x support for pre-Turing GPUs, Dockerfile.
 
