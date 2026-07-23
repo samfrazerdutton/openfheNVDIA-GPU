@@ -235,3 +235,33 @@ extern "C" void gpu_sync_all_to_host() {
     openfhe_cuda::StreamPool::Instance().SyncAll();
     cudaDeviceSynchronize();
 }
+
+// ---- Runtime mode control -------------------------------------------------
+// The GPU/KS gates were read once into function-local statics, which made
+// in-process A/B impossible: any benchmark had to fork a new process per mode,
+// so CPU and GPU samples were never drawn at the same thermal moment. These
+// accessors keep the env vars as defaults but allow a harness to switch modes
+// between reps, which is what paired-difference timing requires.
+static int g_gpu_mode = -1;   // -1 uninitialized, 0 off, 1 on
+static int g_ks_mode  = -1;
+
+extern "C" int gpu_hal_enabled() {
+    if (g_gpu_mode < 0) {
+        const char* e = std::getenv("OPENFHE_GPU");
+        g_gpu_mode = (e && e[0] == '0') ? 0 : 1;
+    }
+    return g_gpu_mode;
+}
+
+extern "C" int gpu_ks_enabled() {
+    if (g_ks_mode < 0) {
+        const char* e = std::getenv("OPENFHE_GPU_KS");
+        g_ks_mode = (e && e[0] == '1') ? 1 : 0;
+    }
+    return g_ks_mode;
+}
+
+extern "C" void gpu_set_mode(int gpu, int ks) {
+    g_gpu_mode = gpu;
+    g_ks_mode  = ks;
+}
