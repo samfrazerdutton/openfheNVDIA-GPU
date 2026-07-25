@@ -30,6 +30,7 @@ add_library(openfhe_cuda_hal SHARED
     src/gpu_evalmult_p34.cpp
     kernels/cuda_math.cu
     kernels/cuda_ntt.cu
+    kernels/cuda_ntt_ct.cu
     kernels/cuda_keyswitch.cu
 )
 target_include_directories(openfhe_cuda_hal PUBLIC
@@ -61,7 +62,7 @@ hal_executable(gpu_engine        src/gpu_engine.cpp)
 add_executable(test_dag
     src/test_dag.cpp src/fhe_compiler.cpp src/cuda_hal.cpp src/twiddle_gen.cpp
     src/vram_cache.cpp src/gpu_keyswitch.cpp src/gpu_evalmult_p34.cpp
-    kernels/cuda_math.cu kernels/cuda_ntt.cu kernels/cuda_keyswitch.cu
+    kernels/cuda_math.cu kernels/cuda_ntt.cu kernels/cuda_ntt_ct.cu kernels/cuda_keyswitch.cu
 )
 target_include_directories(test_dag PRIVATE include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_link_libraries(test_dag PRIVATE CUDA::cudart OpenMP::OpenMP_CXX)
@@ -88,6 +89,7 @@ if(EXISTS /usr/local/lib/libOPENFHEpke.so)
     e2e_executable(bench_vs_cpu   src/bench_vs_cpu.cpp)
     e2e_executable(bench_params   src/bench_params.cpp)
     e2e_executable(bench_paired   src/bench_paired.cpp)
+    e2e_executable(test_ntt_vs_openfhe src/test_ntt_vs_openfhe.cpp)
     e2e_executable(test_e2e_p34   src/test_e2e_p34.cpp)
 else()
     message(STATUS "OpenFHE not found — skipping e2e targets")
